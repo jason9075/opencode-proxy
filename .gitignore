@@ -1,0 +1,11 @@
+.env
+.env.local
+bin/
+logs/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+.direnv/
+tmp/
