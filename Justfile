@@ -12,3 +12,6 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 @vet:
   go vet ./cmd/server
+
+@test-e2e:
+  curl --no-buffer -X POST "http://localhost:8888/test/mock/gemini" -H "Content-Type: application/json" -d '{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}'

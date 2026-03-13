@@ -63,6 +63,9 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/test":
 		s.handleTestPage(w)
 		return
+	case r.Method == http.MethodGet && r.URL.Path == "/test/mock/gemini":
+		s.handleGeminiMock(w)
+		return
 	}
 
 	if r.Method != http.MethodPost {
@@ -645,13 +648,22 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
           </div>
         </div>
 
-        <div>
-          <label for="api-key">API Key</label>
-          <div class="inline">
-            <input id="api-key" type="password" value="{{.OpenAIKey}}" />
-            <button type="button" id="toggle-key">Show</button>
+        <div class="grid">
+          <div>
+            <label for="api-key">API Key</label>
+            <div class="inline">
+              <input id="api-key" type="password" value="{{.OpenAIKey}}" />
+              <button type="button" id="toggle-key">Show</button>
+            </div>
+            <div class="hint">Defaults to the .env key for the selected provider.</div>
           </div>
-          <div class="hint">Defaults to the .env key for the selected provider.</div>
+          <div>
+            <label for="mock-mode">Mock mode</label>
+            <div class="inline">
+              <input id="mock-mode" type="checkbox" />
+              <span class="hint">Route to /test/mock/gemini</span>
+            </div>
+          </div>
         </div>
 
         <div>
@@ -694,6 +706,7 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
       const systemEl = document.getElementById("system");
       const userEl = document.getElementById("user");
       const apiKeyEl = document.getElementById("api-key");
+      const mockEl = document.getElementById("mock-mode");
       const toggleKeyEl = document.getElementById("toggle-key");
       const sendEl = document.getElementById("send");
       const statusEl = document.getElementById("status");
@@ -823,9 +836,12 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
         const selectedModel = modelEl.value.trim();
         const model = selectedModel === "" ? defaults[provider] : selectedModel;
         const payload = isGemini ? buildGeminiRequest() : buildOpenAIRequest(model);
-        const endpoint = isGemini
-          ? "/v1/gemini/models/" + model + ":streamGenerateContent?alt=sse"
-          : "/v1/openai/chat/completions";
+        const useMock = mockEl.checked && isGemini;
+        const endpoint = useMock
+          ? "/test/mock/gemini"
+          : isGemini
+            ? "/v1/gemini/models/" + model + ":streamGenerateContent?alt=sse"
+            : "/v1/openai/chat/completions";
 
         requestEl.textContent = JSON.stringify(payload, null, 2);
 
@@ -878,6 +894,9 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
       providerEl.addEventListener("change", () => {
         populateModels(providerEl.value);
         syncApiKey(providerEl.value);
+        if (providerEl.value !== "gemini") {
+          mockEl.checked = false;
+        }
       });
 
       sendEl.addEventListener("click", () => {
@@ -889,6 +908,7 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
       populateProviders();
       populateModels("openai");
       syncApiKey("openai");
+      mockEl.checked = false;
     </script>
   </body>
 </html>`))
@@ -914,6 +934,30 @@ func (s *ProxyServer) handleTestPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := testTemplate.Execute(w, state); err != nil {
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
+	}
+}
+
+func (s *ProxyServer) handleGeminiMock(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "stream unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	chunks := []string{
+		`data: {"candidates": [{"content": {"parts": [{"text": "Hello"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 11,"candidatesTokenCount": 1,"totalTokenCount": 12,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 11}]},"modelVersion": "gemini-2.5-flash-lite","responseId": "mock-response"}`,
+		`data: {"candidates": [{"content": {"parts": [{"text": "! How can I help you today?"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 11,"candidatesTokenCount": 9,"totalTokenCount": 20,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 11}]},"modelVersion": "gemini-2.5-flash-lite","responseId": "mock-response"}`,
+		"data: [DONE]",
+	}
+
+	for _, chunk := range chunks {
+		_, _ = io.WriteString(w, chunk+"\n\n")
+		flusher.Flush()
+		time.Sleep(120 * time.Millisecond)
 	}
 }
 

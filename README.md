@@ -91,7 +91,11 @@ Visit `http://localhost:8888/config` to view route prefixes and masked API keys 
 
 ## Test Page
 
-Visit `http://localhost:8888/test` to send a single request and inspect request/response content (supports OpenAI and Gemini SSE).
+Visit `http://localhost:8888/test` to send a single request and inspect request/response content (supports OpenAI and Gemini SSE). Enable “Mock mode” to route Gemini requests to `GET /test/mock/gemini`.
+
+## E2E Mock
+
+Run `just test-e2e` to hit the mock Gemini SSE endpoint used by CI/CD.
 
 ## Logs
 
