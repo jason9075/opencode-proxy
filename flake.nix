@@ -17,6 +17,7 @@
             pkgs.go
             pkgs.gopls
             pkgs.just
+            pkgs.air
           ];
         };
       });

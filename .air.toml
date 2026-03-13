@@ -1,0 +1,11 @@
+root = "."
+
+[build]
+  cmd = "go build -o ./tmp/opencode-proxy ./cmd/server"
+  bin = "./tmp/opencode-proxy"
+  delay = 200
+  exclude_dir = ["tmp", "bin", ".git"]
+  include_ext = ["go", "mod", "sum"]
+
+[log]
+  time = true

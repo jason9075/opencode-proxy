@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 @dev:
-  go run ./cmd/server
+  air -c .air.toml
 
 @build:
   mkdir -p ./bin
