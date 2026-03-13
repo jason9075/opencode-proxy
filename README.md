@@ -44,6 +44,7 @@ The server listens on `http://localhost:8888` by default.
 - `OPENAI_API_KEY`, `GEMINI_API_KEY`, `COPILOT_API_KEY`: upstream credentials.
 - `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `COPILOT_BASE_URL`: upstream base URLs.
 - `OPENAI_BASE_URL` should include `/v1` for OpenAI-compatible requests.
+- `RATE_LIMIT_INTERVAL`: sleep duration between requests (e.g. `12s`).
 - `DEBUG`: set to `true` to write payloads into `./debug`.
 
 ## opencode Client Settings
@@ -72,7 +73,10 @@ Use OpenAI-compatible providers that point to path-prefixed routes on the proxy:
         "apiKey": "proxy"
       },
       "models": {
-        "gemini-2.5-pro": { "name": "Gemini 2.5 Pro" }
+        "gemini-2.5-pro": { "name": "Gemini 2.5 Pro" },
+        "gemini-2.5-flash": { "name": "Gemini 2.5 Flash" },
+        "gemini-2.5-flash-lite": { "name": "Gemini 2.5 Flash Lite" },
+        "gemini-3.0-flash": { "name": "Gemini 3 Flash" }
       }
     }
   }
@@ -84,6 +88,10 @@ The proxy does not translate payloads. Use `/v1/openai` for OpenAI-compatible up
 ## Config UI
 
 Visit `http://localhost:8888/config` to view route prefixes and masked API keys from `.env`.
+
+## Test Page
+
+Visit `http://localhost:8888/test` to send a single request and inspect request/response content (supports OpenAI and Gemini SSE).
 
 ## Logs
 
