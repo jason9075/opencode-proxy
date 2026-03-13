@@ -84,7 +84,14 @@ func initSchema(conn *sql.DB) error {
       total_tokens INTEGER,
       FOREIGN KEY (request_id) REFERENCES requests(id)
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `)
+
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
@@ -170,6 +177,33 @@ func (db *Database) CompleteRequest(id string, statusCode int) error {
 	)
 	if err != nil {
 		return fmt.Errorf("complete request: %w", err)
+	}
+	return nil
+}
+
+func (db *Database) GetSetting(key string) (string, bool, error) {
+	row := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, key)
+	var value string
+	if err := row.Scan(&value); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get setting: %w", err)
+	}
+	return value, true, nil
+}
+
+func (db *Database) SetSetting(key string, value string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
+		key,
+		value,
+		time.Now().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("set setting: %w", err)
 	}
 	return nil
 }

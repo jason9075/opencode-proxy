@@ -2,6 +2,8 @@
 .env.local
 bin/
 logs/
+debug/
+
 data/
 *.db
 *.db-shm

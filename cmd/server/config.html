@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>opencode proxy config</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 2rem;
+        color: #0f172a;
+      }
+      main {
+        max-width: 640px;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-top: 1rem;
+      }
+      select,
+      input {
+        width: 100%;
+        padding: 0.6rem 0.8rem;
+        margin-top: 0.4rem;
+        border: 1px solid #cbd5f5;
+        border-radius: 8px;
+      }
+      button {
+        margin-top: 1.5rem;
+        padding: 0.7rem 1.4rem;
+        border: none;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #fff;
+        cursor: pointer;
+      }
+      .hint {
+        color: #475569;
+        font-size: 0.9rem;
+        margin-top: 0.3rem;
+      }
+      .status {
+        margin-top: 1rem;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>opencode proxy</h1>
+      <p>Update provider routing and auth mode in real time.</p>
+
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="openai">openai</option>
+        <option value="gemini">gemini</option>
+        <option value="copilot">copilot</option>
+      </select>
+
+      <label for="auth-mode">Auth mode</label>
+      <select id="auth-mode">
+        <option value="passthrough">passthrough</option>
+        <option value="override">override</option>
+        <option value="hybrid">hybrid</option>
+      </select>
+      <div class="hint">passthrough: use client key; override: use .env key; hybrid: fallback to .env.</div>
+
+      <label for="openai-key">OpenAI key (.env)</label>
+      <input id="openai-key" type="password" readonly />
+
+      <label for="gemini-key">Gemini key (.env)</label>
+      <input id="gemini-key" type="password" readonly />
+
+      <label for="copilot-key">Copilot key (.env)</label>
+      <input id="copilot-key" type="password" readonly />
+
+      <button id="save">Save</button>
+      <div class="status" id="status"></div>
+    </main>
+
+    <script>
+      const providerSelect = document.getElementById("provider");
+      const authModeSelect = document.getElementById("auth-mode");
+      const openaiKey = document.getElementById("openai-key");
+      const geminiKey = document.getElementById("gemini-key");
+      const copilotKey = document.getElementById("copilot-key");
+      const status = document.getElementById("status");
+      const saveButton = document.getElementById("save");
+
+      const mask = (hasKey) => (hasKey ? "********" : "");
+
+      async function loadConfig() {
+        status.textContent = "";
+        const res = await fetch("/api/config");
+        if (!res.ok) {
+          status.textContent = "Failed to load config";
+          return;
+        }
+        const data = await res.json();
+        providerSelect.value = data.provider;
+        authModeSelect.value = data.authMode;
+        openaiKey.value = mask(data.keys?.openai);
+        geminiKey.value = mask(data.keys?.gemini);
+        copilotKey.value = mask(data.keys?.copilot);
+      }
+
+      async function saveConfig() {
+        status.textContent = "Saving...";
+        const payload = {
+          provider: providerSelect.value,
+          authMode: authModeSelect.value,
+        };
+        const res = await fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          status.textContent = text || "Failed to save";
+          return;
+        }
+        status.textContent = "Saved";
+        await loadConfig();
+      }
+
+      saveButton.addEventListener("click", saveConfig);
+      loadConfig();
+    </script>
+  </body>
+</html>

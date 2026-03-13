@@ -46,7 +46,7 @@ func main() {
 		_ = httpServer.Shutdown(ctx)
 	}()
 
-	logger.Info("proxy listening", "port", cfg.Port, "provider", cfg.Provider)
+	logger.Info("proxy listening", "port", cfg.Port)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
