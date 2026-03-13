@@ -131,6 +131,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 		Direction: "client",
 		Body:      decodeDebugBody(body),
+		Headers:   sanitizeHeaders(r.Header),
 	})
 
 	record := RequestRecord{
@@ -332,14 +333,15 @@ func (s *ProxyServer) releaseFingerprint(fingerprint string) {
 }
 
 type debugPayload struct {
-	Timestamp time.Time `json:"timestamp"`
-	RequestID string    `json:"requestId"`
-	SessionID string    `json:"sessionId"`
-	Provider  string    `json:"provider"`
-	Format    string    `json:"format"`
-	Path      string    `json:"path"`
-	Direction string    `json:"direction"`
-	Body      any       `json:"body"`
+	Timestamp time.Time         `json:"timestamp"`
+	RequestID string            `json:"requestId"`
+	SessionID string            `json:"sessionId"`
+	Provider  string            `json:"provider"`
+	Format    string            `json:"format"`
+	Path      string            `json:"path"`
+	Direction string            `json:"direction"`
+	Body      any               `json:"body"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 func (s *ProxyServer) writeDebugPayload(payload debugPayload) {
@@ -369,6 +371,17 @@ func decodeDebugBody(body []byte) any {
 		return string(body)
 	}
 	return payload
+}
+
+func sanitizeHeaders(header http.Header) map[string]string {
+	result := make(map[string]string, len(header))
+	for key, values := range header {
+		if len(values) == 0 {
+			continue
+		}
+		result[key] = strings.Join(values, ",")
+	}
+	return result
 }
 
 func (s *ProxyServer) upstreamBaseURL(provider string) string {
