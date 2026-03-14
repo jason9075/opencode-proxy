@@ -97,6 +97,7 @@ func initSchema(conn *sql.DB) error {
 	}
 
 	addColumnIfMissing(conn, "usage", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0")
+	addColumnIfMissing(conn, "responses", "thinking", "TEXT NOT NULL DEFAULT ''")
 	return nil
 }
 
@@ -143,10 +144,11 @@ func (db *Database) InsertMessage(message MessageRecord) error {
 
 func (db *Database) InsertResponseDelta(delta ResponseDelta) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO responses (request_id, seq, delta, created_at) VALUES (?, ?, ?, ?);`,
+		`INSERT INTO responses (request_id, seq, delta, thinking, created_at) VALUES (?, ?, ?, ?, ?);`,
 		delta.RequestID,
 		delta.Seq,
 		delta.Delta,
+		delta.Thinking,
 		delta.CreatedAt.UnixMilli(),
 	)
 	if err != nil {

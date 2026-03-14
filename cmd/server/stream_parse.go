@@ -1,14 +1,19 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type OpenAIChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
@@ -25,7 +30,8 @@ type GeminiChunk struct {
 	Candidates []struct {
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text    string `json:"text"`
+				Thought bool   `json:"thought"`
 			} `json:"parts"`
 		} `json:"content"`
 	} `json:"candidates"`
@@ -40,7 +46,8 @@ type GeminiChunk struct {
 type OpenAIResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
@@ -57,7 +64,8 @@ type GeminiResponse struct {
 	Candidates []struct {
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text    string `json:"text"`
+				Thought bool   `json:"thought"`
 			} `json:"parts"`
 		} `json:"content"`
 	} `json:"candidates"`
@@ -84,19 +92,19 @@ func parseOpenAIDelta(data []byte) string {
 	return ""
 }
 
-func parseOpenAIFullDelta(data []byte) string {
+func parseOpenAIFullDelta(data []byte) (string, string) {
 	var response OpenAIResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return ""
+		return "", ""
 	}
 
 	for _, choice := range response.Choices {
-		if choice.Message.Content != "" {
-			return choice.Message.Content
+		if choice.Message.Content != "" || choice.Message.ReasoningContent != "" {
+			return choice.Message.Content, choice.Message.ReasoningContent
 		}
 	}
 
-	return ""
+	return "", ""
 }
 
 func parseOpenAIUsage(data []byte) (UsageRecord, bool) {
@@ -170,19 +178,22 @@ func parseGeminiDelta(data []byte) string {
 	return ""
 }
 
-func parseGeminiFullDelta(data []byte) string {
+func parseGeminiFullDelta(data []byte) (string, string) {
 	var response GeminiResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return ""
+		return "", ""
 	}
 
+	var text, thinking strings.Builder
 	for _, candidate := range response.Candidates {
 		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				return part.Text
+			if part.Thought {
+				thinking.WriteString(part.Text)
+			} else {
+				text.WriteString(part.Text)
 			}
 		}
 	}
 
-	return ""
+	return text.String(), thinking.String()
 }

@@ -28,6 +28,7 @@ type ResponseDelta struct {
 	RequestID string
 	Seq       int
 	Delta     string
+	Thinking  string
 	CreatedAt time.Time
 }
 

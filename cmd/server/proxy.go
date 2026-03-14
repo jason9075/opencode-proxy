@@ -1116,7 +1116,8 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 
 	_, _ = w.Write(data)
 
-	if delta := s.extractFullResponseDelta(data, provider); delta != "" {
+	delta, thinking := s.extractFullResponseDelta(data, provider)
+	if delta != "" || thinking != "" {
 		_ = s.appendLogLine(sessionID, proxyLogEntry{
 			Timestamp: time.Now(),
 			Event:     "response_delta",
@@ -1128,12 +1129,20 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 			RequestID: requestID,
 			Seq:       1,
 			Delta:     delta,
+			Thinking:  thinking,
 			CreatedAt: time.Now(),
 		})
 	}
 
 	if usage, ok := s.extractUsageFromResponse(data, requestID, provider); ok {
 		_ = s.db.UpsertUsage(usage)
+	}
+
+	debugBody := decodeDebugBody(data)
+	if thinking != "" {
+		if bodyMap, ok := debugBody.(map[string]any); ok {
+			bodyMap["thinking"] = thinking
+		}
 	}
 
 	return data, debugPayload{
@@ -1145,7 +1154,7 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 		Path:      "response",
 		Headers:   sanitizeHeaders(headers),
 		Status:    status,
-		Body:      decodeDebugBody(data),
+		Body:      debugBody,
 	}
 }
 
@@ -1191,7 +1200,7 @@ func (s *ProxyServer) extractUsage(line string, requestID string, provider strin
 	return usage, true
 }
 
-func (s *ProxyServer) extractFullResponseDelta(data []byte, provider string) string {
+func (s *ProxyServer) extractFullResponseDelta(data []byte, provider string) (string, string) {
 	if provider == "gemini" {
 		return parseGeminiFullDelta(data)
 	}
