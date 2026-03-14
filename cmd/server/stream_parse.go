@@ -178,6 +178,71 @@ func parseGeminiDelta(data []byte) string {
 	return ""
 }
 
+// AnthropicResponse covers both streaming delta events and full responses.
+// Streaming: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+//            {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}
+// Full:      {"content":[{"type":"text","text":"..."}],"usage":{"input_tokens":N,"output_tokens":M}}
+type AnthropicStreamEvent struct {
+	Type  string `json:"type"`
+	Delta *struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	} `json:"delta"`
+}
+
+type AnthropicResponse struct {
+	Content []struct {
+		Type    string `json:"type"`
+		Text    string `json:"text"`
+		Thinking string `json:"thinking"`
+	} `json:"content"`
+	Usage *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+func parseAnthropicDelta(data []byte) string {
+	var event AnthropicStreamEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		return ""
+	}
+	if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+		return event.Delta.Text
+	}
+	return ""
+}
+
+func parseAnthropicFullDelta(data []byte) (string, string) {
+	var resp AnthropicResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", ""
+	}
+	var text, thinking strings.Builder
+	for _, block := range resp.Content {
+		switch block.Type {
+		case "thinking":
+			thinking.WriteString(block.Thinking)
+		case "text":
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String(), thinking.String()
+}
+
+func parseAnthropicUsage(data []byte) (UsageRecord, bool) {
+	var resp AnthropicResponse
+	if err := json.Unmarshal(data, &resp); err != nil || resp.Usage == nil {
+		return UsageRecord{}, false
+	}
+	return UsageRecord{
+		PromptTokens:     resp.Usage.InputTokens,
+		CompletionTokens: resp.Usage.OutputTokens,
+		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+	}, true
+}
+
 func parseGeminiFullDelta(data []byte) (string, string) {
 	var response GeminiResponse
 	if err := json.Unmarshal(data, &response); err != nil {

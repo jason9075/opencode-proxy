@@ -159,6 +159,12 @@ func parseGeminiRequest(body []byte) (ParsedRequest, bool) {
 	return parsed, true
 }
 
+// Anthropic request format is structurally identical to OpenAI, just with
+// different auth and response shapes, so we reuse parseOpenAIRequest.
+func parseAnthropicRequest(body []byte) (ParsedRequest, bool) {
+	return parseOpenAIRequest(body)
+}
+
 func joinGeminiParts(parts []GeminiPart) string {
 	texts := make([]string, 0, len(parts))
 	for _, part := range parts {

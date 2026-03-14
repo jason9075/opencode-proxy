@@ -257,25 +257,23 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ProxyServer) parseRequest(body []byte, header http.Header, format string) ParsedRequest {
+	var parsed ParsedRequest
+	var ok bool
+
 	switch format {
 	case "openai":
-		parsed, ok := parseOpenAIRequest(body)
-		if ok {
-			headerID := firstHeader(header, "x-opencode-session-id", "x-session-id", "opencode-session-id")
-			if headerID != "" {
-				parsed.SessionID = headerID
-			}
-			return parsed
-		}
+		parsed, ok = parseOpenAIRequest(body)
 	case "gemini":
-		parsed, ok := parseGeminiRequest(body)
-		if ok {
-			headerID := firstHeader(header, "x-opencode-session-id", "x-session-id", "opencode-session-id")
-			if headerID != "" {
-				parsed.SessionID = headerID
-			}
-			return parsed
+		parsed, ok = parseGeminiRequest(body)
+	case "anthropic":
+		parsed, ok = parseAnthropicRequest(body)
+	}
+
+	if ok {
+		if headerID := firstHeader(header, "x-opencode-session-id", "x-session-id", "opencode-session-id"); headerID != "" {
+			parsed.SessionID = headerID
 		}
+		return parsed
 	}
 
 	return ParsedRequest{SessionID: firstHeader(header, "x-opencode-session-id", "x-session-id", "opencode-session-id")}
@@ -305,32 +303,43 @@ type upstreamTarget struct {
 
 func (s *ProxyServer) resolveTarget(path string) (upstreamTarget, bool) {
 	if strings.HasPrefix(path, "/v1/openai") {
-		return upstreamTarget{
-			provider: "openai",
-			format:   "openai",
-			path:     trimPrefixPath(path, "/v1/openai"),
-		}, true
+		return upstreamTarget{provider: "openai", format: "openai", path: trimPrefixPath(path, "/v1/openai")}, true
 	}
 	if strings.HasPrefix(path, "/v1/gemini") {
-		return upstreamTarget{
-			provider: "gemini",
-			format:   "gemini",
-			path:     "/v1beta" + trimPrefixPath(path, "/v1/gemini"),
-		}, true
+		return upstreamTarget{provider: "gemini", format: "gemini", path: "/v1beta" + trimPrefixPath(path, "/v1/gemini")}, true
 	}
 	if strings.HasPrefix(path, "/v1beta") {
-		return upstreamTarget{
-			provider: "gemini",
-			format:   "gemini",
-			path:     path,
-		}, true
+		return upstreamTarget{provider: "gemini", format: "gemini", path: path}, true
 	}
 	if strings.HasPrefix(path, "/chat/completions") {
-		return upstreamTarget{
-			provider: "openai",
-			format:   "openai",
-			path:     path,
-		}, true
+		return upstreamTarget{provider: "openai", format: "openai", path: path}, true
+	}
+	if strings.HasPrefix(path, "/v1/anthropic") {
+		return upstreamTarget{provider: "anthropic", format: "anthropic", path: trimPrefixPath(path, "/v1/anthropic")}, true
+	}
+	if strings.HasPrefix(path, "/v1/xai") {
+		return upstreamTarget{provider: "xai", format: "openai", path: trimPrefixPath(path, "/v1/xai")}, true
+	}
+	if strings.HasPrefix(path, "/v1/groq") {
+		return upstreamTarget{provider: "groq", format: "openai", path: trimPrefixPath(path, "/v1/groq")}, true
+	}
+	if strings.HasPrefix(path, "/v1/mistral") {
+		return upstreamTarget{provider: "mistral", format: "openai", path: trimPrefixPath(path, "/v1/mistral")}, true
+	}
+	if strings.HasPrefix(path, "/v1/openrouter") {
+		return upstreamTarget{provider: "openrouter", format: "openai", path: trimPrefixPath(path, "/v1/openrouter")}, true
+	}
+	if strings.HasPrefix(path, "/v1/togetherai") {
+		return upstreamTarget{provider: "togetherai", format: "openai", path: trimPrefixPath(path, "/v1/togetherai")}, true
+	}
+	if strings.HasPrefix(path, "/v1/perplexity") {
+		return upstreamTarget{provider: "perplexity", format: "openai", path: trimPrefixPath(path, "/v1/perplexity")}, true
+	}
+	if strings.HasPrefix(path, "/v1/cerebras") {
+		return upstreamTarget{provider: "cerebras", format: "openai", path: trimPrefixPath(path, "/v1/cerebras")}, true
+	}
+	if strings.HasPrefix(path, "/v1/deepinfra") {
+		return upstreamTarget{provider: "deepinfra", format: "openai", path: trimPrefixPath(path, "/v1/deepinfra")}, true
 	}
 	return upstreamTarget{}, false
 }
@@ -484,7 +493,7 @@ func sanitizeHeaders(header http.Header) map[string]string {
 
 func isSensitiveHeader(key string) bool {
 	lower := strings.ToLower(key)
-	return lower == "authorization" || lower == "x-goog-api-key" || lower == "x-proxy-api-key"
+	return lower == "authorization" || lower == "x-goog-api-key" || lower == "x-proxy-api-key" || lower == "x-api-key"
 }
 
 func (s *ProxyServer) appendLogLine(sessionID string, entry proxyLogEntry) error {
@@ -524,6 +533,24 @@ func (s *ProxyServer) upstreamBaseURL(provider string) string {
 		return s.cfg.GeminiBaseURL
 	case "copilot":
 		return s.cfg.CopilotBaseURL
+	case "anthropic":
+		return s.cfg.AnthropicBaseURL
+	case "xai":
+		return s.cfg.XAIBaseURL
+	case "groq":
+		return s.cfg.GroqBaseURL
+	case "mistral":
+		return s.cfg.MistralBaseURL
+	case "openrouter":
+		return s.cfg.OpenRouterBaseURL
+	case "togetherai":
+		return s.cfg.TogetherAIBaseURL
+	case "perplexity":
+		return s.cfg.PerplexityBaseURL
+	case "cerebras":
+		return s.cfg.CerebrasBaseURL
+	case "deepinfra":
+		return s.cfg.DeepInfraBaseURL
 	default:
 		return ""
 	}
@@ -533,14 +560,20 @@ func (s *ProxyServer) applyAuth(header http.Header, provider string) error {
 	override := header.Get("x-proxy-api-key")
 	header.Del("x-proxy-api-key")
 
+	// Helper: set Bearer auth, clear competing auth headers.
+	setBearer := func(key string) {
+		header.Del("x-goog-api-key")
+		header.Del("x-api-key")
+		header.Set("Authorization", "Bearer "+key)
+	}
+
 	switch provider {
 	case "openai":
 		key := firstNonEmpty(override, s.cfg.OpenAIAPIKey)
 		if key == "" {
 			return fmt.Errorf("missing OpenAI API key")
 		}
-		header.Del("x-goog-api-key")
-		header.Set("Authorization", "Bearer "+key)
+		setBearer(key)
 	case "gemini":
 		key := firstNonEmpty(override, s.cfg.GeminiAPIKey)
 		if key == "" {
@@ -553,8 +586,66 @@ func (s *ProxyServer) applyAuth(header http.Header, provider string) error {
 		if key == "" {
 			return fmt.Errorf("missing Copilot API key")
 		}
+		setBearer(key)
+	case "anthropic":
+		key := firstNonEmpty(override, s.cfg.AnthropicAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Anthropic API key")
+		}
+		header.Del("Authorization")
 		header.Del("x-goog-api-key")
-		header.Set("Authorization", "Bearer "+key)
+		header.Set("x-api-key", key)
+		if header.Get("anthropic-version") == "" {
+			header.Set("anthropic-version", "2023-06-01")
+		}
+	case "xai":
+		key := firstNonEmpty(override, s.cfg.XAIAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing xAI API key")
+		}
+		setBearer(key)
+	case "groq":
+		key := firstNonEmpty(override, s.cfg.GroqAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Groq API key")
+		}
+		setBearer(key)
+	case "mistral":
+		key := firstNonEmpty(override, s.cfg.MistralAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Mistral API key")
+		}
+		setBearer(key)
+	case "openrouter":
+		key := firstNonEmpty(override, s.cfg.OpenRouterAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing OpenRouter API key")
+		}
+		setBearer(key)
+	case "togetherai":
+		key := firstNonEmpty(override, s.cfg.TogetherAIAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Together AI API key")
+		}
+		setBearer(key)
+	case "perplexity":
+		key := firstNonEmpty(override, s.cfg.PerplexityAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Perplexity API key")
+		}
+		setBearer(key)
+	case "cerebras":
+		key := firstNonEmpty(override, s.cfg.CerebrasAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing Cerebras API key")
+		}
+		setBearer(key)
+	case "deepinfra":
+		key := firstNonEmpty(override, s.cfg.DeepInfraAPIKey)
+		if key == "" {
+			return fmt.Errorf("missing DeepInfra API key")
+		}
+		setBearer(key)
 	default:
 		return fmt.Errorf("invalid provider")
 	}
@@ -862,16 +953,43 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
       const defaults = {
         openai: "gpt-4o",
         gemini: "gemini-2.5-pro",
+        anthropic: "claude-sonnet-4-5",
+        xai: "grok-3",
+        groq: "llama-3.3-70b-versatile",
+        mistral: "mistral-large-2512",
+        openrouter: "x-ai/grok-4",
+        togetherai: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        perplexity: "sonar-pro",
+        cerebras: "qwen-3-235b-a22b-instruct-2507",
+        deepinfra: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
       };
 
       const providerKeys = {
         openai: "{{.OpenAIKey}}",
         gemini: "{{.GeminiKey}}",
+        anthropic: "{{.AnthropicKey}}",
+        xai: "{{.XAIKey}}",
+        groq: "{{.GroqKey}}",
+        mistral: "{{.MistralKey}}",
+        openrouter: "{{.OpenRouterKey}}",
+        togetherai: "{{.TogetherAIKey}}",
+        perplexity: "{{.PerplexityKey}}",
+        cerebras: "{{.CerebrasKey}}",
+        deepinfra: "{{.DeepInfraKey}}",
       };
 
       const modelOptions = {
-        openai: ["", "gpt-4o", "gpt-4o-mini", "gpt-4.1"],
-        gemini: ["", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.0-flash"],
+        openai: ["", "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3-mini", "o1-pro"],
+        gemini: ["", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
+        anthropic: ["", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929"],
+        xai: ["", "grok-3", "grok-3-fast", "grok-4", "grok-4-fast", "grok-3-mini-fast-latest"],
+        groq: ["", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-qwq-32b", "deepseek-r1-distill-llama-70b"],
+        mistral: ["", "mistral-large-2512", "mistral-small-2506", "mistral-medium-2505", "devstral-medium-2507"],
+        openrouter: ["", "x-ai/grok-4", "x-ai/grok-3", "x-ai/grok-4-fast", "moonshotai/kimi-k2", "nousresearch/hermes-4-70b"],
+        togetherai: ["", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8", "moonshotai/Kimi-K2-Instruct"],
+        perplexity: ["", "sonar-pro", "sonar", "sonar-reasoning-pro"],
+        cerebras: ["", "qwen-3-235b-a22b-instruct-2507", "gpt-oss-120b", "zai-glm-4.7"],
+        deepinfra: ["", "Qwen/Qwen3-Coder-480B-A35B-Instruct", "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo", "moonshotai/Kimi-K2-Instruct"],
       };
 
       function toNumber(value) {
@@ -946,7 +1064,7 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
 
       function populateProviders() {
         providerEl.innerHTML = "";
-        ["openai", "gemini"].forEach((provider) => {
+        ["openai", "gemini", "anthropic", "xai", "groq", "mistral", "openrouter", "togetherai", "perplexity", "cerebras", "deepinfra"].forEach((provider) => {
           const option = document.createElement("option");
           option.value = provider;
           option.textContent = provider;
@@ -978,15 +1096,22 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
 
         const provider = providerEl.value;
         const isGemini = provider === "gemini";
+        const isAnthropicNative = provider === "anthropic";
         const selectedModel = modelEl.value.trim();
         const model = selectedModel === "" ? defaults[provider] : selectedModel;
         const payload = isGemini ? buildGeminiRequest() : buildOpenAIRequest(model);
         const useMock = mockEl.checked && isGemini;
-        const endpoint = useMock
-          ? "/test/mock/gemini"
-          : isGemini
-            ? "/v1/gemini/models/" + model + ":streamGenerateContent?alt=sse"
-            : "/v1/openai/chat/completions";
+
+        let endpoint;
+        if (useMock) {
+          endpoint = "/test/mock/gemini";
+        } else if (isGemini) {
+          endpoint = "/v1/gemini/models/" + model + ":streamGenerateContent?alt=sse";
+        } else if (isAnthropicNative) {
+          endpoint = "/v1/anthropic/messages";
+        } else {
+          endpoint = "/v1/" + provider + "/chat/completions";
+        }
 
         requestEl.textContent = JSON.stringify(payload, null, 2);
 
@@ -1042,6 +1167,8 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
         if (providerEl.value !== "gemini") {
           mockEl.checked = false;
         }
+        // Anthropic uses max_tokens in the payload; update placeholder
+        userEl.placeholder = "Say hello.";
       });
 
       sendEl.addEventListener("click", () => {
@@ -1059,23 +1186,32 @@ var testTemplate = template.Must(template.New("test").Parse(`<!doctype html>
 </html>`))
 
 func (s *ProxyServer) handleConfigPage(w http.ResponseWriter) {
-	state := ConfigState{
-		OpenAIKey:  s.cfg.OpenAIAPIKey,
-		GeminiKey:  s.cfg.GeminiAPIKey,
-		CopilotKey: s.cfg.CopilotAPIKey,
-	}
+	state := s.buildConfigState()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := configTemplate.Execute(w, state); err != nil {
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
 	}
 }
 
-func (s *ProxyServer) handleTestPage(w http.ResponseWriter) {
-	state := ConfigState{
-		OpenAIKey:  s.cfg.OpenAIAPIKey,
-		GeminiKey:  s.cfg.GeminiAPIKey,
-		CopilotKey: s.cfg.CopilotAPIKey,
+func (s *ProxyServer) buildConfigState() ConfigState {
+	return ConfigState{
+		OpenAIKey:     s.cfg.OpenAIAPIKey,
+		GeminiKey:     s.cfg.GeminiAPIKey,
+		CopilotKey:    s.cfg.CopilotAPIKey,
+		AnthropicKey:  s.cfg.AnthropicAPIKey,
+		XAIKey:        s.cfg.XAIAPIKey,
+		GroqKey:       s.cfg.GroqAPIKey,
+		MistralKey:    s.cfg.MistralAPIKey,
+		OpenRouterKey: s.cfg.OpenRouterAPIKey,
+		TogetherAIKey: s.cfg.TogetherAIAPIKey,
+		PerplexityKey: s.cfg.PerplexityAPIKey,
+		CerebrasKey:   s.cfg.CerebrasAPIKey,
+		DeepInfraKey:  s.cfg.DeepInfraAPIKey,
 	}
+}
+
+func (s *ProxyServer) handleTestPage(w http.ResponseWriter) {
+	state := s.buildConfigState()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := testTemplate.Execute(w, state); err != nil {
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
@@ -1201,10 +1337,14 @@ func (s *ProxyServer) extractUsage(line string, requestID string, provider strin
 }
 
 func (s *ProxyServer) extractFullResponseDelta(data []byte, provider string) (string, string) {
-	if provider == "gemini" {
+	switch provider {
+	case "gemini":
 		return parseGeminiFullDelta(data)
+	case "anthropic":
+		return parseAnthropicFullDelta(data)
+	default:
+		return parseOpenAIFullDelta(data)
 	}
-	return parseOpenAIFullDelta(data)
 }
 
 func (s *ProxyServer) extractUsageFromResponse(data []byte, requestID string, provider string) (UsageRecord, bool) {
@@ -1212,9 +1352,12 @@ func (s *ProxyServer) extractUsageFromResponse(data []byte, requestID string, pr
 		usage UsageRecord
 		ok    bool
 	)
-	if provider == "gemini" {
+	switch provider {
+	case "gemini":
 		usage, ok = parseGeminiUsage(data)
-	} else {
+	case "anthropic":
+		usage, ok = parseAnthropicUsage(data)
+	default:
 		usage, ok = parseOpenAIUsage(data)
 	}
 	if !ok {
