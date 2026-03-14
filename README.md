@@ -100,8 +100,8 @@ Run `just test-e2e` to hit the mock Gemini SSE endpoint used by CI/CD.
 ## Logs
 
 - SQLite: `./data/opencode-proxy.db`
-- Session logs: `./logs/<session-id>.log`
-- Debug payloads: `./debug/<request-id>-client.json`, `./debug/<request-id>-upstream.json`
+- Session logs (JSONL): `./logs/<session-id>/proxy.json`
+- Debug payloads (prettified JSON): `./debug/<session-id>/<YYYY-MM-DD>_<HH-mm>_<request-id>_<client|upstream|response>.json`
 
 `session-id` comes from opencode headers or is generated if missing.
 

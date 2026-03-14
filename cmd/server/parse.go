@@ -51,12 +51,17 @@ func parseOpenAIRequest(body []byte) (ParsedRequest, bool) {
 	}
 
 	messages := make([]LoggedMessage, 0, len(req.Messages))
+	var userTurns []string
 	for _, msg := range req.Messages {
+		content := parseOpenAIContent(msg.Content)
 		messages = append(messages, LoggedMessage{
 			Role:    msg.Role,
-			Content: parseOpenAIContent(msg.Content),
+			Content: content,
 			Name:    msg.Name,
 		})
+		if msg.Role == "user" {
+			userTurns = append(userTurns, content)
+		}
 	}
 
 	sessionID := req.SessionID
@@ -78,6 +83,7 @@ func parseOpenAIRequest(body []byte) (ParsedRequest, bool) {
 		TopP:        req.TopP,
 		MaxTokens:   req.MaxTokens,
 		Messages:    messages,
+		UserTurns:   userTurns,
 	}, true
 }
 
@@ -117,6 +123,7 @@ func parseGeminiRequest(body []byte) (ParsedRequest, bool) {
 	}
 
 	messages := make([]LoggedMessage, 0, len(req.Contents))
+	var userTurns []string
 	if req.SystemInstruction != nil {
 		messages = append(messages, LoggedMessage{
 			Role:    "system",
@@ -132,11 +139,15 @@ func parseGeminiRequest(body []byte) (ParsedRequest, bool) {
 			Role:    role,
 			Content: joinGeminiParts(content.Parts),
 		})
+		if role == "user" && len(content.Parts) > 0 {
+			userTurns = append(userTurns, content.Parts[0].Text)
+		}
 	}
 
 	parsed := ParsedRequest{
-		Stream:   true,
-		Messages: messages,
+		Stream:    true,
+		Messages:  messages,
+		UserTurns: userTurns,
 	}
 
 	if req.GenerationConfig != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,13 +23,14 @@ import (
 )
 
 type ProxyServer struct {
-	cfg      Config
-	db       *Database
-	client   *http.Client
-	log      *slog.Logger
-	queue    chan queueItem
-	inflight map[string]struct{}
-	mu       sync.Mutex
+	cfg          Config
+	db           *Database
+	client       *http.Client
+	log          *slog.Logger
+	queue        chan queueItem
+	inflight     map[string]struct{}
+	sessionIndex map[string]string
+	mu           sync.Mutex
 }
 
 type queueItem struct {
@@ -43,9 +45,10 @@ func NewProxyServer(cfg Config, db *Database, log *slog.Logger) *ProxyServer {
 		client: &http.Client{
 			Timeout: cfg.RequestTimeout,
 		},
-		log:      log,
-		queue:    make(chan queueItem),
-		inflight: make(map[string]struct{}),
+		log:          log,
+		queue:        make(chan queueItem),
+		inflight:     make(map[string]struct{}),
+		sessionIndex: make(map[string]string),
 	}
 	go server.runQueue()
 	return server
@@ -100,7 +103,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed := s.parseRequest(body, r.Header, target.format)
 	if parsed.SessionID == "" {
-		parsed.SessionID = uuid.New().String()
+		parsed.SessionID = s.getSessionID(parsed.UserTurns)
 	}
 
 	fingerprint := buildFingerprint(parsed.SessionID, r.URL.Path, body)
@@ -121,7 +124,20 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 
 	s.log.Info("client request", "id", requestID, "session", parsed.SessionID, "provider", target.provider, "method", r.Method, "path", r.URL.Path, "model", parsed.Model, "messages", len(parsed.Messages), "bytes", len(body))
-	s.appendLogLine(parsed.SessionID, fmt.Sprintf("%s client request id=%s provider=%s method=%s path=%s model=%s messages=%d bytes=%d", startedAt.Format(time.RFC3339), requestID, target.provider, r.Method, r.URL.Path, parsed.Model, len(parsed.Messages), len(body)))
+	if err := s.appendLogLine(parsed.SessionID, proxyLogEntry{
+		Timestamp: startedAt,
+		Event:     "client_request",
+		RequestID: requestID,
+		Provider:  target.provider,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Model:     parsed.Model,
+		Messages:  len(parsed.Messages),
+		Bytes:     len(body),
+	}); err != nil {
+		s.log.Error("write proxy log failed", "error", err)
+	}
+
 	s.writeDebugPayload(debugPayload{
 		Timestamp: startedAt,
 		RequestID: requestID,
@@ -129,7 +145,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Provider:  target.provider,
 		Format:    target.format,
 		Path:      r.URL.Path,
-		Direction: "client",
+		Direction: "client-request",
 		Body:      decodeDebugBody(body),
 		Headers:   sanitizeHeaders(r.Header),
 	})
@@ -170,17 +186,6 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeDebugPayload(debugPayload{
-		Timestamp: time.Now(),
-		RequestID: requestID,
-		SessionID: parsed.SessionID,
-		Provider:  target.provider,
-		Format:    target.format,
-		Path:      upstreamURL.Path,
-		Direction: "upstream",
-		Body:      decodeDebugBody(body),
-	})
-
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL.String(), bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to create upstream request", http.StatusInternalServerError)
@@ -194,6 +199,18 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeDebugPayload(debugPayload{
+		Timestamp: time.Now(),
+		RequestID: requestID,
+		SessionID: parsed.SessionID,
+		Provider:  target.provider,
+		Format:    target.format,
+		Path:      upstreamURL.Path,
+		Direction: "upstream-request",
+		Body:      decodeDebugBody(body),
+		Headers:   sanitizeHeaders(upstreamReq.Header),
+	})
+
 	resp, err := s.client.Do(upstreamReq)
 	if err != nil {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
@@ -204,11 +221,27 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
+	var clientRespBody any
 	if parsed.Stream || strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		s.streamResponse(w, resp.Body, requestID, parsed.SessionID, target.provider)
+		text := s.streamResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
+		clientRespBody = map[string]any{"text": text}
 	} else {
-		s.forwardResponse(w, resp.Body, requestID, parsed.SessionID, target.provider)
+		data := s.forwardResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
+		clientRespBody = decodeDebugBody(data)
 	}
+
+	s.writeDebugPayload(debugPayload{
+		Timestamp: time.Now(),
+		RequestID: requestID,
+		SessionID: parsed.SessionID,
+		Provider:  target.provider,
+		Format:    target.format,
+		Path:      "response",
+		Direction: "client-response",
+		Headers:   sanitizeHeaders(w.Header()),
+		Status:    resp.StatusCode,
+		Body:      clientRespBody,
+	})
 
 	if err := s.db.CompleteRequest(requestID, resp.StatusCode); err != nil {
 		s.log.Error("complete request failed", "error", err)
@@ -216,7 +249,16 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(startedAt)
 	s.log.Info("provider response", "id", requestID, "session", parsed.SessionID, "provider", target.provider, "status", resp.StatusCode, "duration_ms", elapsed.Milliseconds())
-	s.appendLogLine(parsed.SessionID, fmt.Sprintf("%s provider response id=%s provider=%s status=%d duration_ms=%d", time.Now().Format(time.RFC3339), requestID, target.provider, resp.StatusCode, elapsed.Milliseconds()))
+	if err := s.appendLogLine(parsed.SessionID, proxyLogEntry{
+		Timestamp:  time.Now(),
+		Event:      "provider_response",
+		RequestID:  requestID,
+		Provider:   target.provider,
+		Status:     resp.StatusCode,
+		DurationMs: elapsed.Milliseconds(),
+	}); err != nil {
+		s.log.Error("write proxy log failed", "error", err)
+	}
 
 	time.Sleep(3 * time.Second)
 }
@@ -316,6 +358,40 @@ func buildFingerprint(sessionID string, path string, body []byte) string {
 	return sessionID + ":" + path + ":" + hex.EncodeToString(sum[:])
 }
 
+func (s *ProxyServer) getSessionID(userTurns []string) string {
+	if len(userTurns) == 0 {
+		return uuid.New().String()
+	}
+
+	cur := hashUserTurns(userTurns)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// multi-turn: look up by all previous user turns
+	if len(userTurns) >= 2 {
+		prev := hashUserTurns(userTurns[:len(userTurns)-1])
+		if existing, ok := s.sessionIndex[prev]; ok {
+			s.sessionIndex[cur] = existing
+			return existing
+		}
+	}
+
+	// first turn or no match: new session
+	sessionID := uuid.New().String()
+	s.sessionIndex[cur] = sessionID
+	return sessionID
+}
+
+func hashUserTurns(turns []string) string {
+	hasher := sha1.New()
+	for _, turn := range turns {
+		_, _ = hasher.Write([]byte(turn))
+		_, _ = hasher.Write([]byte{0})
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func (s *ProxyServer) acquireFingerprint(fingerprint string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,19 +418,40 @@ type debugPayload struct {
 	Direction string            `json:"direction"`
 	Body      any               `json:"body"`
 	Headers   map[string]string `json:"headers,omitempty"`
+	Status    int               `json:"status,omitempty"`
+}
+
+type proxyLogEntry struct {
+	Timestamp  time.Time `json:"timestamp"`
+	Event      string    `json:"event"`
+	RequestID  string    `json:"requestId"`
+	Provider   string    `json:"provider"`
+	Method     string    `json:"method,omitempty"`
+	Path       string    `json:"path,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	Messages   int       `json:"messages,omitempty"`
+	Bytes      int       `json:"bytes,omitempty"`
+	Status     int       `json:"status,omitempty"`
+	DurationMs int64     `json:"durationMs,omitempty"`
+	Delta      string    `json:"delta,omitempty"`
+	Upstream   bool      `json:"upstream,omitempty"`
 }
 
 func (s *ProxyServer) writeDebugPayload(payload debugPayload) {
 	if !s.cfg.Debug {
 		return
 	}
-	if err := os.MkdirAll("debug", 0o755); err != nil {
+
+	date := payload.Timestamp.Format("2006-01-02")
+	folder := filepath.Join("debug", payload.SessionID)
+	if err := os.MkdirAll(folder, 0o755); err != nil {
 		s.log.Error("create debug dir failed", "error", err)
 		return
 	}
 
-	name := fmt.Sprintf("%s-%s.json", payload.RequestID, payload.Direction)
-	path := filepath.Join("debug", name)
+	clock := payload.Timestamp.Format("15-04-05")
+	name := fmt.Sprintf("%s_%s_%s_%s.json", date, clock, payload.RequestID, payload.Direction)
+	path := filepath.Join(folder, name)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		s.log.Error("marshal debug payload failed", "error", err)
@@ -379,9 +476,47 @@ func sanitizeHeaders(header http.Header) map[string]string {
 		if len(values) == 0 {
 			continue
 		}
+		if isSensitiveHeader(key) {
+			result[key] = ""
+			continue
+		}
 		result[key] = strings.Join(values, ",")
 	}
 	return result
+}
+
+func isSensitiveHeader(key string) bool {
+	lower := strings.ToLower(key)
+	return lower == "authorization" || lower == "x-goog-api-key" || lower == "x-proxy-api-key"
+}
+
+func (s *ProxyServer) appendLogLine(sessionID string, entry proxyLogEntry) error {
+	if sessionID == "" {
+		return fmt.Errorf("missing session id")
+	}
+	path := filepath.Join(s.cfg.LogDir, sessionID, "proxy.json")
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	return appendJSONLine(path, data)
+}
+
+func appendJSONLine(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *ProxyServer) upstreamBaseURL(provider string) string {
@@ -974,19 +1109,17 @@ func (s *ProxyServer) handleGeminiMock(w http.ResponseWriter) {
 	}
 }
 
-func (s *ProxyServer) streamResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string) {
+func (s *ProxyServer) streamResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string, headers http.Header, status int) string {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		s.forwardResponse(w, body, requestID, sessionID, provider)
-		return
+		data := s.forwardResponse(w, body, requestID, sessionID, provider, headers, status)
+		return string(data)
 	}
-
-	logFile, closeFile := s.openLogFile(sessionID)
-	defer closeFile()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	seq := 0
+	var text strings.Builder
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -995,9 +1128,14 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, body io.Reader, requ
 
 		if delta := s.extractDelta(line, provider); delta != "" {
 			seq++
-			if logFile != nil {
-				_, _ = logFile.WriteString(delta)
-			}
+			text.WriteString(delta)
+			_ = s.appendLogLine(sessionID, proxyLogEntry{
+				Timestamp: time.Now(),
+				Event:     "response_delta",
+				RequestID: requestID,
+				Provider:  provider,
+				Delta:     delta,
+			})
 			_ = s.db.InsertResponseDelta(ResponseDelta{
 				RequestID: requestID,
 				Seq:       seq,
@@ -1010,24 +1148,42 @@ func (s *ProxyServer) streamResponse(w http.ResponseWriter, body io.Reader, requ
 			_ = s.db.UpsertUsage(usage)
 		}
 	}
+
+	s.writeDebugPayload(debugPayload{
+		Timestamp: time.Now(),
+		RequestID: requestID,
+		SessionID: sessionID,
+		Provider:  provider,
+		Format:    provider,
+		Path:      "response",
+		Direction: "upstream-response",
+		Headers:   sanitizeHeaders(headers),
+		Status:    status,
+		Body: map[string]any{
+			"text": text.String(),
+		},
+	})
+
+	return text.String()
 }
 
-func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string) {
+func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string, headers http.Header, status int) []byte {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		http.Error(w, "failed to read upstream", http.StatusBadGateway)
-		return
+		return nil
 	}
 
 	_, _ = w.Write(data)
 
 	if delta := s.extractFullResponseDelta(data, provider); delta != "" {
-		logFile, closeFile := s.openLogFile(sessionID)
-		defer closeFile()
-
-		if logFile != nil {
-			_, _ = logFile.WriteString(delta)
-		}
+		_ = s.appendLogLine(sessionID, proxyLogEntry{
+			Timestamp: time.Now(),
+			Event:     "response_delta",
+			RequestID: requestID,
+			Provider:  provider,
+			Delta:     delta,
+		})
 		_ = s.db.InsertResponseDelta(ResponseDelta{
 			RequestID: requestID,
 			Seq:       1,
@@ -1039,6 +1195,21 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 	if usage, ok := s.extractUsageFromResponse(data, requestID, provider); ok {
 		_ = s.db.UpsertUsage(usage)
 	}
+
+	s.writeDebugPayload(debugPayload{
+		Timestamp: time.Now(),
+		RequestID: requestID,
+		SessionID: sessionID,
+		Provider:  provider,
+		Format:    provider,
+		Path:      "response",
+		Direction: "upstream-response",
+		Headers:   sanitizeHeaders(headers),
+		Status:    status,
+		Body:      decodeDebugBody(data),
+	})
+
+	return data
 }
 
 func (s *ProxyServer) extractDelta(line string, provider string) string {
@@ -1095,35 +1266,6 @@ func (s *ProxyServer) extractUsageFromResponse(data []byte, requestID string, pr
 	}
 	usage.RequestID = requestID
 	return usage, true
-}
-
-func (s *ProxyServer) openLogFile(sessionID string) (*os.File, func()) {
-	if sessionID == "" {
-		return nil, func() {}
-	}
-
-	if err := os.MkdirAll(s.cfg.LogDir, 0o755); err != nil {
-		s.log.Error("create log dir failed", "error", err)
-		return nil, func() {}
-	}
-
-	path := filepath.Join(s.cfg.LogDir, sessionID+".log")
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		s.log.Error("open log file failed", "error", err)
-		return nil, func() {}
-	}
-
-	return file, func() { _ = file.Close() }
-}
-
-func (s *ProxyServer) appendLogLine(sessionID string, line string) {
-	file, closeFile := s.openLogFile(sessionID)
-	defer closeFile()
-	if file == nil {
-		return
-	}
-	_, _ = file.WriteString(line + "\n")
 }
 
 func copyHeaders(dst http.Header, src http.Header) {

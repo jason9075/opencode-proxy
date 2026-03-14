@@ -53,4 +53,5 @@ type ParsedRequest struct {
 	TopP        *float64
 	MaxTokens   *int
 	Messages    []LoggedMessage
+	UserTurns   []string
 }
