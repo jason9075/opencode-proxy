@@ -18,6 +18,7 @@
             pkgs.gopls
             pkgs.just
             pkgs.air
+            pkgs.visidata # vd xxx.db
           ];
         };
       });
