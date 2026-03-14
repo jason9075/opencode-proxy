@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -138,17 +137,17 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("write proxy log failed", "error", err)
 	}
 
-	s.writeDebugPayload(debugPayload{
+	var dbg debugRecord
+	dbg.ClientRequest = &debugPayload{
 		Timestamp: startedAt,
 		RequestID: requestID,
 		SessionID: parsed.SessionID,
 		Provider:  target.provider,
 		Format:    target.format,
 		Path:      r.URL.Path,
-		Direction: "client-request",
 		Body:      decodeDebugBody(body),
 		Headers:   sanitizeHeaders(r.Header),
-	})
+	}
 
 	record := RequestRecord{
 		ID:          requestID,
@@ -199,17 +198,16 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeDebugPayload(debugPayload{
+	dbg.UpstreamRequest = &debugPayload{
 		Timestamp: time.Now(),
 		RequestID: requestID,
 		SessionID: parsed.SessionID,
 		Provider:  target.provider,
 		Format:    target.format,
 		Path:      upstreamURL.Path,
-		Direction: "upstream-request",
 		Body:      decodeDebugBody(body),
 		Headers:   sanitizeHeaders(upstreamReq.Header),
-	})
+	}
 
 	resp, err := s.client.Do(upstreamReq)
 	if err != nil {
@@ -221,27 +219,22 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	var clientRespBody any
-	if parsed.Stream || strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		text := s.streamResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
-		clientRespBody = map[string]any{"text": text}
-	} else {
-		data := s.forwardResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
-		clientRespBody = decodeDebugBody(data)
-	}
+	data, upstreamResp := s.forwardResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
+	dbg.UpstreamResponse = &upstreamResp
+	clientRespBody := decodeDebugBody(data)
 
-	s.writeDebugPayload(debugPayload{
+	dbg.ClientResponse = &debugPayload{
 		Timestamp: time.Now(),
 		RequestID: requestID,
 		SessionID: parsed.SessionID,
 		Provider:  target.provider,
 		Format:    target.format,
 		Path:      "response",
-		Direction: "client-response",
 		Headers:   sanitizeHeaders(w.Header()),
 		Status:    resp.StatusCode,
 		Body:      clientRespBody,
-	})
+	}
+	s.writeDebugRecord(parsed.SessionID, requestID, startedAt, dbg)
 
 	if err := s.db.CompleteRequest(requestID, resp.StatusCode); err != nil {
 		s.log.Error("complete request failed", "error", err)
@@ -415,10 +408,16 @@ type debugPayload struct {
 	Provider  string            `json:"provider"`
 	Format    string            `json:"format"`
 	Path      string            `json:"path"`
-	Direction string            `json:"direction"`
 	Body      any               `json:"body"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Status    int               `json:"status,omitempty"`
+}
+
+type debugRecord struct {
+	ClientRequest    *debugPayload `json:"client-request,omitempty"`
+	UpstreamRequest  *debugPayload `json:"upstream-request,omitempty"`
+	UpstreamResponse *debugPayload `json:"upstream-response,omitempty"`
+	ClientResponse   *debugPayload `json:"client-response,omitempty"`
 }
 
 type proxyLogEntry struct {
@@ -437,28 +436,26 @@ type proxyLogEntry struct {
 	Upstream   bool      `json:"upstream,omitempty"`
 }
 
-func (s *ProxyServer) writeDebugPayload(payload debugPayload) {
+func (s *ProxyServer) writeDebugRecord(sessionID, requestID string, startedAt time.Time, rec debugRecord) {
 	if !s.cfg.Debug {
 		return
 	}
 
-	date := payload.Timestamp.Format("2006-01-02")
-	folder := filepath.Join("debug", payload.SessionID)
+	folder := filepath.Join("debug", sessionID)
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		s.log.Error("create debug dir failed", "error", err)
 		return
 	}
 
-	clock := payload.Timestamp.Format("15-04-05")
-	name := fmt.Sprintf("%s_%s_%s_%s.json", date, clock, payload.RequestID, payload.Direction)
+	name := fmt.Sprintf("%s_%s.json", startedAt.Format("2006-01-02_15-04-05"), requestID)
 	path := filepath.Join(folder, name)
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		s.log.Error("marshal debug payload failed", "error", err)
+		s.log.Error("marshal debug record failed", "error", err)
 		return
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		s.log.Error("write debug payload failed", "error", err)
+		s.log.Error("write debug record failed", "error", err)
 	}
 }
 
@@ -1109,69 +1106,12 @@ func (s *ProxyServer) handleGeminiMock(w http.ResponseWriter) {
 	}
 }
 
-func (s *ProxyServer) streamResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string, headers http.Header, status int) string {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		data := s.forwardResponse(w, body, requestID, sessionID, provider, headers, status)
-		return string(data)
-	}
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	seq := 0
-	var text strings.Builder
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		_, _ = io.WriteString(w, line+"\n")
-		flusher.Flush()
-
-		if delta := s.extractDelta(line, provider); delta != "" {
-			seq++
-			text.WriteString(delta)
-			_ = s.appendLogLine(sessionID, proxyLogEntry{
-				Timestamp: time.Now(),
-				Event:     "response_delta",
-				RequestID: requestID,
-				Provider:  provider,
-				Delta:     delta,
-			})
-			_ = s.db.InsertResponseDelta(ResponseDelta{
-				RequestID: requestID,
-				Seq:       seq,
-				Delta:     delta,
-				CreatedAt: time.Now(),
-			})
-		}
-
-		if usage, ok := s.extractUsage(line, requestID, provider); ok {
-			_ = s.db.UpsertUsage(usage)
-		}
-	}
-
-	s.writeDebugPayload(debugPayload{
-		Timestamp: time.Now(),
-		RequestID: requestID,
-		SessionID: sessionID,
-		Provider:  provider,
-		Format:    provider,
-		Path:      "response",
-		Direction: "upstream-response",
-		Headers:   sanitizeHeaders(headers),
-		Status:    status,
-		Body: map[string]any{
-			"text": text.String(),
-		},
-	})
-
-	return text.String()
-}
-
-func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string, headers http.Header, status int) []byte {
+func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, requestID string, sessionID string, provider string, headers http.Header, status int) ([]byte, debugPayload) {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		http.Error(w, "failed to read upstream", http.StatusBadGateway)
-		return nil
+		return nil, debugPayload{}
 	}
 
 	_, _ = w.Write(data)
@@ -1196,20 +1136,17 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 		_ = s.db.UpsertUsage(usage)
 	}
 
-	s.writeDebugPayload(debugPayload{
+	return data, debugPayload{
 		Timestamp: time.Now(),
 		RequestID: requestID,
 		SessionID: sessionID,
 		Provider:  provider,
 		Format:    provider,
 		Path:      "response",
-		Direction: "upstream-response",
 		Headers:   sanitizeHeaders(headers),
 		Status:    status,
 		Body:      decodeDebugBody(data),
-	})
-
-	return data
+	}
 }
 
 func (s *ProxyServer) extractDelta(line string, provider string) string {
@@ -1230,9 +1167,6 @@ func (s *ProxyServer) extractDelta(line string, provider string) string {
 }
 
 func (s *ProxyServer) extractUsage(line string, requestID string, provider string) (UsageRecord, bool) {
-	if provider == "gemini" {
-		return UsageRecord{}, false
-	}
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "data:") {
 		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
@@ -1241,7 +1175,15 @@ func (s *ProxyServer) extractUsage(line string, requestID string, provider strin
 		return UsageRecord{}, false
 	}
 
-	usage, ok := parseOpenAIUsage([]byte(trimmed))
+	var (
+		usage UsageRecord
+		ok    bool
+	)
+	if provider == "gemini" {
+		usage, ok = parseGeminiUsage([]byte(trimmed))
+	} else {
+		usage, ok = parseOpenAIUsage([]byte(trimmed))
+	}
 	if !ok {
 		return UsageRecord{}, false
 	}
@@ -1257,10 +1199,15 @@ func (s *ProxyServer) extractFullResponseDelta(data []byte, provider string) str
 }
 
 func (s *ProxyServer) extractUsageFromResponse(data []byte, requestID string, provider string) (UsageRecord, bool) {
+	var (
+		usage UsageRecord
+		ok    bool
+	)
 	if provider == "gemini" {
-		return UsageRecord{}, false
+		usage, ok = parseGeminiUsage(data)
+	} else {
+		usage, ok = parseOpenAIUsage(data)
 	}
-	usage, ok := parseOpenAIUsage(data)
 	if !ok {
 		return UsageRecord{}, false
 	}

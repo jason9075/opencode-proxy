@@ -15,6 +15,9 @@ type OpenAIChunk struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -26,6 +29,12 @@ type GeminiChunk struct {
 			} `json:"parts"`
 		} `json:"content"`
 	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	} `json:"usageMetadata"`
 }
 
 type OpenAIResponse struct {
@@ -38,6 +47,9 @@ type OpenAIResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -49,6 +61,12 @@ type GeminiResponse struct {
 			} `json:"parts"`
 		} `json:"content"`
 	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	} `json:"usageMetadata"`
 }
 
 func parseOpenAIDelta(data []byte) string {
@@ -84,11 +102,15 @@ func parseOpenAIFullDelta(data []byte) string {
 func parseOpenAIUsage(data []byte) (UsageRecord, bool) {
 	var chunk OpenAIChunk
 	if err := json.Unmarshal(data, &chunk); err == nil && chunk.Usage != nil {
-		return UsageRecord{
+		rec := UsageRecord{
 			PromptTokens:     chunk.Usage.PromptTokens,
 			CompletionTokens: chunk.Usage.CompletionTokens,
 			TotalTokens:      chunk.Usage.TotalTokens,
-		}, true
+		}
+		if chunk.Usage.PromptTokensDetails != nil {
+			rec.CacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		return rec, true
 	}
 
 	var response OpenAIResponse
@@ -96,10 +118,38 @@ func parseOpenAIUsage(data []byte) (UsageRecord, bool) {
 		return UsageRecord{}, false
 	}
 
-	return UsageRecord{
+	rec := UsageRecord{
 		PromptTokens:     response.Usage.PromptTokens,
 		CompletionTokens: response.Usage.CompletionTokens,
 		TotalTokens:      response.Usage.TotalTokens,
+	}
+	if response.Usage.PromptTokensDetails != nil {
+		rec.CacheReadTokens = response.Usage.PromptTokensDetails.CachedTokens
+	}
+	return rec, true
+}
+
+func parseGeminiUsage(data []byte) (UsageRecord, bool) {
+	var chunk GeminiChunk
+	if err := json.Unmarshal(data, &chunk); err == nil && chunk.UsageMetadata != nil {
+		return UsageRecord{
+			PromptTokens:     chunk.UsageMetadata.PromptTokenCount,
+			CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
+			CacheReadTokens:  chunk.UsageMetadata.CachedContentTokenCount,
+		}, true
+	}
+
+	var response GeminiResponse
+	if err := json.Unmarshal(data, &response); err != nil || response.UsageMetadata == nil {
+		return UsageRecord{}, false
+	}
+
+	return UsageRecord{
+		PromptTokens:     response.UsageMetadata.PromptTokenCount,
+		CompletionTokens: response.UsageMetadata.CandidatesTokenCount,
+		TotalTokens:      response.UsageMetadata.TotalTokenCount,
+		CacheReadTokens:  response.UsageMetadata.CachedContentTokenCount,
 	}, true
 }
 

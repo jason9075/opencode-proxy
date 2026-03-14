@@ -95,7 +95,13 @@ func initSchema(conn *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
+
+	addColumnIfMissing(conn, "usage", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0")
 	return nil
+}
+
+func addColumnIfMissing(conn *sql.DB, table, column, def string) {
+	_, _ = conn.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, column, def))
 }
 
 func (db *Database) InsertRequest(req RequestRecord) error {
@@ -151,16 +157,18 @@ func (db *Database) InsertResponseDelta(delta ResponseDelta) error {
 
 func (db *Database) UpsertUsage(usage UsageRecord) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO usage (request_id, prompt_tokens, completion_tokens, total_tokens)
-     VALUES (?, ?, ?, ?)
+		`INSERT INTO usage (request_id, prompt_tokens, completion_tokens, total_tokens, cache_read_tokens)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(request_id) DO UPDATE SET
        prompt_tokens = excluded.prompt_tokens,
        completion_tokens = excluded.completion_tokens,
-       total_tokens = excluded.total_tokens;`,
+       total_tokens = excluded.total_tokens,
+       cache_read_tokens = excluded.cache_read_tokens;`,
 		usage.RequestID,
 		usage.PromptTokens,
 		usage.CompletionTokens,
 		usage.TotalTokens,
+		usage.CacheReadTokens,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert usage: %w", err)

@@ -36,6 +36,7 @@ type UsageRecord struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	CacheReadTokens  int
 }
 
 type LoggedMessage struct {
