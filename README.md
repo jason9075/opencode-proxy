@@ -99,7 +99,7 @@ Run `just test-e2e` to hit the mock Gemini SSE endpoint used by CI/CD.
 
 ## Logs
 
-- SQLite: `./data/opencode-proxy.db`
+- SQLite: `./db/opencode-proxy.db`
 - Session logs (JSONL): `./logs/<session-id>/proxy.json`
 - Debug payloads (prettified JSON): `./debug/<session-id>/<YYYY-MM-DD>_<HH-mm>_<request-id>_<client|upstream|response>.json`
 

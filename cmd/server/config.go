@@ -47,7 +47,7 @@ func LoadConfig() (Config, error) {
 	cfg := Config{
 		Port:              readEnvInt("PORT", 8888),
 		LogDir:            readEnvString("LOG_DIR", "./logs"),
-		DatabasePath:      readEnvString("DATABASE_PATH", "./data/opencode-proxy.db"),
+		DatabasePath:      readEnvString("DATABASE_PATH", "./db/opencode-proxy.db"),
 		OpenAIBaseURL:     readEnvString("OPENAI_BASE_URL", "https://api.openai.com"),
 		OpenAIAPIKey:      readEnvString("OPENAI_API_KEY", ""),
 		GeminiBaseURL:     readEnvString("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
