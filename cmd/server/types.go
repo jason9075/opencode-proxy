@@ -46,6 +46,13 @@ type LoggedMessage struct {
 	Name    string
 }
 
+type ParsedTool struct {
+	Type        string
+	Name        string
+	Description string
+	Parameters  string // JSON string
+}
+
 type ParsedRequest struct {
 	SessionID   string
 	Model       string
@@ -55,5 +62,15 @@ type ParsedRequest struct {
 	TopP        *float64
 	MaxTokens   *int
 	Messages    []LoggedMessage
+	Tools       []ParsedTool
 	UserTurns   []string
+}
+
+type ToolRecord struct {
+	RequestID   string
+	Type        string
+	Name        string
+	Description string
+	Parameters  string
+	CreatedAt   time.Time
 }

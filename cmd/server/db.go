@@ -90,6 +90,17 @@ func initSchema(conn *sql.DB) error {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS tools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      parameters TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (request_id) REFERENCES requests(id)
+    );
   `)
 
 	if err != nil {
@@ -174,6 +185,22 @@ func (db *Database) UpsertUsage(usage UsageRecord) error {
 	)
 	if err != nil {
 		return fmt.Errorf("upsert usage: %w", err)
+	}
+	return nil
+}
+
+func (db *Database) InsertTool(tool ToolRecord) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO tools (request_id, type, name, description, parameters, created_at) VALUES (?, ?, ?, ?, ?, ?);`,
+		tool.RequestID,
+		tool.Type,
+		tool.Name,
+		tool.Description,
+		tool.Parameters,
+		tool.CreatedAt.UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("insert tool: %w", err)
 	}
 	return nil
 }

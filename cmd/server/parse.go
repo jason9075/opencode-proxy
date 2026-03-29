@@ -5,9 +5,21 @@ import (
 	"strings"
 )
 
+type OpenAIToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type OpenAITool struct {
+	Type     string             `json:"type"`
+	Function OpenAIToolFunction `json:"function"`
+}
+
 type OpenAIRequest struct {
 	Model       string          `json:"model"`
 	Messages    []OpenAIMessage `json:"messages"`
+	Tools       []OpenAITool    `json:"tools"`
 	Stream      bool            `json:"stream"`
 	Temperature *float64        `json:"temperature"`
 	TopP        *float64        `json:"top_p"`
@@ -23,10 +35,21 @@ type OpenAIMessage struct {
 	Name    string          `json:"name"`
 }
 
+type GeminiFunctionDeclaration struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type GeminiTool struct {
+	FunctionDeclarations []GeminiFunctionDeclaration `json:"functionDeclarations"`
+}
+
 type GeminiRequest struct {
 	Contents          []GeminiContent         `json:"contents"`
 	SystemInstruction *GeminiContent          `json:"systemInstruction"`
 	GenerationConfig  *GeminiGenerationConfig `json:"generationConfig"`
+	Tools             []GeminiTool            `json:"tools"`
 }
 
 type GeminiContent struct {
@@ -74,6 +97,20 @@ func parseOpenAIRequest(body []byte) (ParsedRequest, bool) {
 		}
 	}
 
+	tools := make([]ParsedTool, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		params := string(t.Function.Parameters)
+		if params == "null" || params == "" {
+			params = "{}"
+		}
+		tools = append(tools, ParsedTool{
+			Type:        t.Type,
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  params,
+		})
+	}
+
 	return ParsedRequest{
 		SessionID:   sessionID,
 		Model:       req.Model,
@@ -83,6 +120,7 @@ func parseOpenAIRequest(body []byte) (ParsedRequest, bool) {
 		TopP:        req.TopP,
 		MaxTokens:   req.MaxTokens,
 		Messages:    messages,
+		Tools:       tools,
 		UserTurns:   userTurns,
 	}, true
 }
@@ -144,9 +182,26 @@ func parseGeminiRequest(body []byte) (ParsedRequest, bool) {
 		}
 	}
 
+	var tools []ParsedTool
+	for _, t := range req.Tools {
+		for _, fn := range t.FunctionDeclarations {
+			params := string(fn.Parameters)
+			if params == "null" || params == "" {
+				params = "{}"
+			}
+			tools = append(tools, ParsedTool{
+				Type:        "function",
+				Name:        fn.Name,
+				Description: fn.Description,
+				Parameters:  params,
+			})
+		}
+	}
+
 	parsed := ParsedRequest{
 		Stream:    true,
 		Messages:  messages,
+		Tools:     tools,
 		UserTurns: userTurns,
 	}
 

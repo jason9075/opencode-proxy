@@ -11,19 +11,23 @@ import (
 // ---- View types ----
 
 type RequestViewRow struct {
-	ID               string `json:"id"`
-	SessionID        string `json:"sessionId"`
-	Provider         string `json:"provider"`
-	Model            string `json:"model"`
-	Stream           bool   `json:"stream"`
-	StatusCode       int    `json:"statusCode"`
-	CreatedAt        int64  `json:"createdAt"`
-	CompletedAt      *int64 `json:"completedAt"`
-	DurationMs       int64  `json:"durationMs"`
-	PromptTokens     int    `json:"promptTokens"`
-	CompletionTokens int    `json:"completionTokens"`
-	TotalTokens      int    `json:"totalTokens"`
-	CacheReadTokens  int    `json:"cacheReadTokens"`
+	ID               string   `json:"id"`
+	SessionID        string   `json:"sessionId"`
+	Provider         string   `json:"provider"`
+	Model            string   `json:"model"`
+	Stream           bool     `json:"stream"`
+	Path             string   `json:"path"`
+	Temperature      *float64 `json:"temperature"`
+	TopP             *float64 `json:"topP"`
+	MaxTokens        *int     `json:"maxTokens"`
+	StatusCode       int      `json:"statusCode"`
+	CreatedAt        int64    `json:"createdAt"`
+	CompletedAt      *int64   `json:"completedAt"`
+	DurationMs       int64    `json:"durationMs"`
+	PromptTokens     int      `json:"promptTokens"`
+	CompletionTokens int      `json:"completionTokens"`
+	TotalTokens      int      `json:"totalTokens"`
+	CacheReadTokens  int      `json:"cacheReadTokens"`
 }
 
 type MessageView struct {
@@ -32,9 +36,17 @@ type MessageView struct {
 	Name    string `json:"name"`
 }
 
+type ToolView struct {
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  string `json:"parameters"`
+}
+
 type RequestDetailView struct {
 	Request  RequestViewRow `json:"request"`
 	Messages []MessageView  `json:"messages"`
+	Tools    []ToolView     `json:"tools"`
 	Response string         `json:"response"`
 	Thinking string         `json:"thinking"`
 }
@@ -82,7 +94,8 @@ func (db *Database) ListSessions(limit int) ([]SessionView, error) {
 func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, error) {
 	rows, err := db.conn.Query(`
 		SELECT
-			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream,
+			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream, r.path,
+			r.temperature, r.top_p, r.max_tokens,
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
 			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0)
@@ -101,8 +114,11 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 		var row RequestViewRow
 		var stream int
 		var completedAt sql.NullInt64
+		var temperature, topP sql.NullFloat64
+		var maxTokens sql.NullInt64
 		if err := rows.Scan(
-			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream,
+			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream, &row.Path,
+			&temperature, &topP, &maxTokens,
 			&row.StatusCode, &row.CreatedAt, &completedAt,
 			&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
 		); err != nil {
@@ -113,6 +129,16 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 			v := completedAt.Int64
 			row.CompletedAt = &v
 			row.DurationMs = v - row.CreatedAt
+		}
+		if temperature.Valid {
+			row.Temperature = &temperature.Float64
+		}
+		if topP.Valid {
+			row.TopP = &topP.Float64
+		}
+		if maxTokens.Valid {
+			v := int(maxTokens.Int64)
+			row.MaxTokens = &v
 		}
 		requestRows = append(requestRows, row)
 	}
@@ -159,9 +185,28 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 		}
 		respRows.Close()
 
+		toolRows, err := db.conn.Query(
+			`SELECT type, name, description, parameters FROM tools WHERE request_id = ? ORDER BY id ASC`,
+			req.ID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get tools: %w", err)
+		}
+		var tools []ToolView
+		for toolRows.Next() {
+			var t ToolView
+			if err := toolRows.Scan(&t.Type, &t.Name, &t.Description, &t.Parameters); err != nil {
+				toolRows.Close()
+				return nil, fmt.Errorf("scan tool: %w", err)
+			}
+			tools = append(tools, t)
+		}
+		toolRows.Close()
+
 		details = append(details, RequestDetailView{
 			Request:  req,
 			Messages: messages,
+			Tools:    tools,
 			Response: sb.String(),
 			Thinking: thinkingSb.String(),
 		})
@@ -172,7 +217,8 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 func (db *Database) ListRequestViews(limit int) ([]RequestViewRow, error) {
 	rows, err := db.conn.Query(`
 		SELECT
-			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream,
+			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream, r.path,
+			r.temperature, r.top_p, r.max_tokens,
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
 			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0)
@@ -191,8 +237,11 @@ func (db *Database) ListRequestViews(limit int) ([]RequestViewRow, error) {
 		var row RequestViewRow
 		var stream int
 		var completedAt sql.NullInt64
+		var temperature, topP sql.NullFloat64
+		var maxTokens sql.NullInt64
 		if err := rows.Scan(
-			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream,
+			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream, &row.Path,
+			&temperature, &topP, &maxTokens,
 			&row.StatusCode, &row.CreatedAt, &completedAt,
 			&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
 		); err != nil {
@@ -204,6 +253,16 @@ func (db *Database) ListRequestViews(limit int) ([]RequestViewRow, error) {
 			row.CompletedAt = &v
 			row.DurationMs = v - row.CreatedAt
 		}
+		if temperature.Valid {
+			row.Temperature = &temperature.Float64
+		}
+		if topP.Valid {
+			row.TopP = &topP.Float64
+		}
+		if maxTokens.Valid {
+			v := int(maxTokens.Int64)
+			row.MaxTokens = &v
+		}
 		result = append(result, row)
 	}
 	return result, nil
@@ -214,9 +273,13 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 	var stream int
 	var completedAt sql.NullInt64
 
+	var temperature, topP sql.NullFloat64
+	var maxTokens sql.NullInt64
+
 	err := db.conn.QueryRow(`
 		SELECT
-			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream,
+			r.id, r.session_id, r.provider, COALESCE(r.model, ''), r.stream, r.path,
+			r.temperature, r.top_p, r.max_tokens,
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
 			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0)
@@ -224,7 +287,8 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 		LEFT JOIN usage u ON u.request_id = r.id
 		WHERE r.id = ?
 	`, id).Scan(
-		&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream,
+		&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream, &row.Path,
+		&temperature, &topP, &maxTokens,
 		&row.StatusCode, &row.CreatedAt, &completedAt,
 		&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
 	)
@@ -240,6 +304,16 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 		v := completedAt.Int64
 		row.CompletedAt = &v
 		row.DurationMs = v - row.CreatedAt
+	}
+	if temperature.Valid {
+		row.Temperature = &temperature.Float64
+	}
+	if topP.Valid {
+		row.TopP = &topP.Float64
+	}
+	if maxTokens.Valid {
+		v := int(maxTokens.Int64)
+		row.MaxTokens = &v
 	}
 
 	msgRows, err := db.conn.Query(
@@ -281,9 +355,28 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 		}
 	}
 
+	toolRows, err := db.conn.Query(
+		`SELECT type, name, description, parameters FROM tools WHERE request_id = ? ORDER BY id ASC`,
+		id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get tools: %w", err)
+	}
+	defer toolRows.Close()
+
+	var tools []ToolView
+	for toolRows.Next() {
+		var t ToolView
+		if err := toolRows.Scan(&t.Type, &t.Name, &t.Description, &t.Parameters); err != nil {
+			return nil, fmt.Errorf("scan tool: %w", err)
+		}
+		tools = append(tools, t)
+	}
+
 	return &RequestDetailView{
 		Request:  row,
 		Messages: messages,
+		Tools:    tools,
 		Response: sb.String(),
 		Thinking: thinkingSb.String(),
 	}, nil
@@ -569,6 +662,83 @@ const viewerTemplate = `<!DOCTYPE html>
       font-size: 14px; line-height: 1.8; color: #c9ab4a;
     }
 
+    /* ── Filter bar ── */
+    #filter-bar {
+      flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 16px;
+      background: var(--bg2); border-bottom: 1px solid var(--border);
+    }
+    #filter-bar .filter-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.8px; color: var(--dim); margin-right: 4px;
+    }
+    .filter-btn {
+      padding: 2px 10px; border-radius: 4px; font-size: 11px;
+      border: 1px solid var(--border); background: var(--bg3);
+      color: var(--dim); cursor: pointer; font-family: inherit;
+      transition: all 0.1s; opacity: 0.5;
+    }
+    .filter-btn:hover { opacity: 0.8; }
+    .filter-btn.active { opacity: 1; }
+    .filter-btn.f-client-request.active  { border-color: var(--blue);   color: var(--blue); }
+    .filter-btn.f-upstream-request.active { border-color: var(--muted);  color: var(--muted); }
+    .filter-btn.f-upstream-response.active { border-color: var(--yellow); color: var(--yellow); }
+    .filter-btn.f-client-response.active  { border-color: var(--green);  color: var(--green); }
+
+    /* ── Request sections ── */
+    .req-section { border-top: 1px solid var(--border2); }
+    .section-label {
+      padding: 5px 24px; font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.8px;
+      border-left: 3px solid transparent;
+    }
+    .label-client-request   { color: var(--blue);   border-left-color: var(--blue);   background: #0d1520; }
+    .label-upstream-request  { color: var(--muted);  border-left-color: var(--muted);  background: #13191f; }
+    .label-upstream-response { color: var(--yellow); border-left-color: var(--yellow); background: #161200; }
+    .label-client-response   { color: var(--green);  border-left-color: var(--green);  background: #0a1a0a; }
+
+    /* ── Meta grid (for upstream-request / client-response) ── */
+    .meta-grid { display: flex; flex-direction: column; gap: 4px; }
+    .meta-row { display: flex; align-items: baseline; gap: 12px; font-size: 13px; }
+    .meta-key { color: var(--dim); font-size: 11px; min-width: 110px; flex-shrink: 0; }
+    .meta-val { color: var(--text); }
+
+    /* ── Tools ── */
+    .tools-section { display: flex; flex-direction: column; gap: 6px; }
+    .tools-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.6px; color: var(--purple);
+    }
+    .tools-list { display: flex; flex-direction: column; gap: 6px; }
+    .tool-item {
+      border: 1px solid #2d1f40; border-radius: 6px;
+      background: #130d1e; overflow: hidden;
+    }
+    .tool-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px; cursor: pointer;
+      user-select: none;
+    }
+    .tool-header:hover { background: #1e1530; }
+    .tool-badge {
+      font-size: 10px; font-weight: 700; padding: 1px 6px;
+      border-radius: 3px; background: #2a1545; color: var(--purple);
+      flex-shrink: 0;
+    }
+    .tool-name { font-size: 13px; color: var(--text); flex-shrink: 0; }
+    .tool-desc { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .tool-chevron { color: var(--dim); font-size: 10px; margin-left: auto; flex-shrink: 0; transition: transform 0.15s; }
+    .tool-item.open .tool-chevron { transform: rotate(90deg); }
+    .tool-params {
+      display: none; padding: 10px 14px;
+      border-top: 1px solid #2d1f40;
+      font-size: 12px; line-height: 1.6;
+      color: #c9b8e8; white-space: pre-wrap; word-break: break-all;
+      max-height: 300px; overflow-y: auto;
+    }
+    .tool-item.open .tool-params { display: block; }
+
     /* ── Thinking ── */
     .thinking-section { display: flex; flex-direction: column; gap: 6px; }
     .thinking-label {
@@ -617,6 +787,14 @@ const viewerTemplate = `<!DOCTYPE html>
     <button class="ml-auto" onclick="reload()">Refresh</button>
   </div>
 
+  <div id="filter-bar">
+    <span class="filter-label">Show</span>
+    <button id="fbtn-clientRequest" class="filter-btn f-client-request" onclick="toggleFilter('clientRequest')">client-request</button>
+    <button id="fbtn-upstreamRequest" class="filter-btn f-upstream-request" onclick="toggleFilter('upstreamRequest')">upstream-request</button>
+    <button id="fbtn-upstreamResponse" class="filter-btn f-upstream-response" onclick="toggleFilter('upstreamResponse')">upstream-response</button>
+    <button id="fbtn-clientResponse" class="filter-btn f-client-response" onclick="toggleFilter('clientResponse')">client-response</button>
+  </div>
+
   <div id="body">
     <div id="sidebar">
       <div id="sidebar-header">Sessions</div>
@@ -649,6 +827,49 @@ const viewerTemplate = `<!DOCTYPE html>
   <script>
     var activeSessionId = null;
     var systemPromptContents = {};
+
+    /* ── Filter ── */
+    var FILTER_KEY = 'proxy_viewer_filter_v1';
+    var filter = { clientRequest: true, upstreamRequest: true, upstreamResponse: true, clientResponse: true };
+
+    function loadFilter() {
+      try {
+        var saved = localStorage.getItem(FILTER_KEY);
+        if (saved) {
+          var parsed = JSON.parse(saved);
+          Object.keys(filter).forEach(function(k) { if (k in parsed) filter[k] = parsed[k]; });
+        }
+      } catch(e) {}
+      updateFilterButtons();
+    }
+
+    function saveFilter() {
+      try { localStorage.setItem(FILTER_KEY, JSON.stringify(filter)); } catch(e) {}
+    }
+
+    function toggleFilter(key) {
+      filter[key] = !filter[key];
+      saveFilter();
+      updateFilterButtons();
+      var classMap = {
+        clientRequest: 'section-client-request',
+        upstreamRequest: 'section-upstream-request',
+        upstreamResponse: 'section-upstream-response',
+        clientResponse: 'section-client-response',
+      };
+      var els = document.querySelectorAll('.' + classMap[key]);
+      for (var i = 0; i < els.length; i++) {
+        els[i].style.display = filter[key] ? '' : 'none';
+      }
+    }
+
+    function updateFilterButtons() {
+      var keys = ['clientRequest', 'upstreamRequest', 'upstreamResponse', 'clientResponse'];
+      for (var i = 0; i < keys.length; i++) {
+        var btn = document.getElementById('fbtn-' + keys[i]);
+        if (btn) btn.classList.toggle('active', filter[keys[i]]);
+      }
+    }
 
     /* ── Helpers ── */
 
@@ -781,8 +1002,9 @@ const viewerTemplate = `<!DOCTYPE html>
         var r = d.request;
         var sc = r.statusCode;
 
-        /* request header */
         html += '<div class="req-block">';
+
+        /* ── sticky req header ── */
         html += '<div class="req-header">';
         html += '<span class="req-provider ' + providerClass(r.provider) + '">' + esc(r.provider) + '</span>';
         html += '<span class="req-model">' + esc(r.model || '-') + '</span>';
@@ -797,18 +1019,17 @@ const viewerTemplate = `<!DOCTYPE html>
         html += '<span class="req-time">' + hhmm(r.createdAt) + '</span>';
         html += '</div>';
 
-        /* conversation */
+        /* ── client-request ── */
+        html += '<div class="req-section section-client-request"' + (filter.clientRequest ? '' : ' style="display:none"') + '>';
+        html += '<div class="section-label label-client-request">client-request</div>';
         html += '<div class="conv">';
 
         var msgs = d.messages || [];
-        var systemMsgs = [];
-        var convMsgs = [];
+        var systemMsgs = [], convMsgs = [];
         for (var j = 0; j < msgs.length; j++) {
           if (msgs[j].role === 'system') systemMsgs.push(msgs[j]);
           else convMsgs.push(msgs[j]);
         }
-
-        /* system messages collapsed */
         for (var j = 0; j < systemMsgs.length; j++) {
           var m = systemMsgs[j];
           var uid = 'sm-' + i + '-' + j;
@@ -821,46 +1042,86 @@ const viewerTemplate = `<!DOCTYPE html>
           html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
           html += '</div>';
         }
-
-        /* user/assistant messages */
         for (var j = 0; j < convMsgs.length; j++) {
           var m = convMsgs[j];
-          var roleClass = 'role-' + (m.role || 'user');
-          html += '<div class="msg ' + roleClass + '">';
+          html += '<div class="msg role-' + esc(m.role || 'user') + '">';
           html += '<div class="msg-role-label">' + esc(m.role || 'user');
           if (m.name) html += ' <span style="color:var(--dim);font-weight:400;">' + esc(m.name) + '</span>';
           html += '</div>';
           html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
           html += '</div>';
         }
+        var tools = d.tools || [];
+        if (tools.length) {
+          html += '<div class="tools-section">';
+          html += '<div class="tools-label">Tools (' + tools.length + ')</div>';
+          html += '<div class="tools-list">';
+          for (var j = 0; j < tools.length; j++) {
+            var t = tools[j];
+            var tid = 'tool-' + i + '-' + j;
+            var prettyParams = t.parameters;
+            try { prettyParams = JSON.stringify(JSON.parse(t.parameters), null, 2); } catch(e2) {}
+            html += '<div class="tool-item" id="' + tid + '">';
+            html += '<div class="tool-header" onclick="toggleTool(\'' + tid + '\')">';
+            html += '<span class="tool-badge">' + esc(t.type || 'fn') + '</span>';
+            html += '<span class="tool-name">' + esc(t.name) + '</span>';
+            if (t.description) html += '<span class="tool-desc">' + esc(t.description) + '</span>';
+            html += '<span class="tool-chevron">&#9654;</span>';
+            html += '</div>';
+            html += '<div class="tool-params">' + esc(prettyParams) + '</div>';
+            html += '</div>';
+          }
+          html += '</div></div>';
+        }
+        html += '</div></div>'; /* .conv + .req-section */
 
-        /* thinking */
+        /* ── upstream-request ── */
+        html += '<div class="req-section section-upstream-request"' + (filter.upstreamRequest ? '' : ' style="display:none"') + '>';
+        html += '<div class="section-label label-upstream-request">upstream-request</div>';
+        html += '<div class="conv"><div class="meta-grid">';
+        html += '<div class="meta-row"><span class="meta-key">provider</span><span class="meta-val"><span class="req-provider ' + providerClass(r.provider) + '">' + esc(r.provider) + '</span></span></div>';
+        html += '<div class="meta-row"><span class="meta-key">path</span><span class="meta-val">' + esc(r.path || '-') + '</span></div>';
+        html += '<div class="meta-row"><span class="meta-key">model</span><span class="meta-val">' + esc(r.model || '-') + '</span></div>';
+        html += '<div class="meta-row"><span class="meta-key">stream</span><span class="meta-val">' + (r.stream ? 'true' : 'false') + '</span></div>';
+        if (r.temperature != null) html += '<div class="meta-row"><span class="meta-key">temperature</span><span class="meta-val">' + r.temperature + '</span></div>';
+        if (r.topP != null)        html += '<div class="meta-row"><span class="meta-key">top_p</span><span class="meta-val">' + r.topP + '</span></div>';
+        if (r.maxTokens != null)   html += '<div class="meta-row"><span class="meta-key">max_tokens</span><span class="meta-val">' + r.maxTokens + '</span></div>';
+        html += '</div></div></div>'; /* .meta-grid + .conv + .req-section */
+
+        /* ── upstream-response ── */
+        html += '<div class="req-section section-upstream-response"' + (filter.upstreamResponse ? '' : ' style="display:none"') + '>';
+        html += '<div class="section-label label-upstream-response">upstream-response</div>';
+        html += '<div class="conv">';
         if (d.thinking) {
           html += '<div class="thinking-section">';
           html += '<div class="thinking-label">Thinking</div>';
           html += '<div class="thinking-bubble">' + esc(d.thinking) + '</div>';
           html += '</div>';
         }
-
-        /* response */
         if (d.response) {
           html += '<div class="resp-section">';
           html += '<div class="resp-label">Response</div>';
           html += '<div class="resp-bubble">' + esc(d.response) + '</div>';
           html += '</div>';
         }
-
-        html += '</div>'; /* .conv */
-
-        /* usage bar */
-        if (r.totalTokens) {
-          html += '<div class="usage-bar">';
-          html += '<span><strong>Prompt</strong> ' + fmt(r.promptTokens) + '</span>';
-          html += '<span><strong>Completion</strong> ' + fmt(r.completionTokens) + '</span>';
-          html += '<span><strong>Total</strong> ' + fmt(r.totalTokens) + '</span>';
-          if (r.cacheReadTokens) html += '<span><strong>Cache read</strong> ' + fmt(r.cacheReadTokens) + '</span>';
-          html += '</div>';
+        if (!d.thinking && !d.response) {
+          html += '<span style="color:var(--dim);font-size:12px;">No response captured</span>';
         }
+        html += '</div></div>';
+
+        /* ── client-response ── */
+        html += '<div class="req-section section-client-response"' + (filter.clientResponse ? '' : ' style="display:none"') + '>';
+        html += '<div class="section-label label-client-response">client-response</div>';
+        html += '<div class="conv"><div class="meta-grid">';
+        html += '<div class="meta-row"><span class="meta-key">status</span><span class="meta-val ' + statusClass(sc) + '">' + (sc || '-') + '</span></div>';
+        html += '<div class="meta-row"><span class="meta-key">duration</span><span class="meta-val">' + dur(r.durationMs) + '</span></div>';
+        if (r.totalTokens) {
+          html += '<div class="meta-row"><span class="meta-key">prompt tokens</span><span class="meta-val">' + fmt(r.promptTokens) + '</span></div>';
+          html += '<div class="meta-row"><span class="meta-key">completion tokens</span><span class="meta-val">' + fmt(r.completionTokens) + '</span></div>';
+          html += '<div class="meta-row"><span class="meta-key">total tokens</span><span class="meta-val">' + fmt(r.totalTokens) + '</span></div>';
+          if (r.cacheReadTokens) html += '<div class="meta-row"><span class="meta-key">cache read</span><span class="meta-val">' + fmt(r.cacheReadTokens) + '</span></div>';
+        }
+        html += '</div></div></div>';
 
         html += '</div>'; /* .req-block */
       }
@@ -871,6 +1132,11 @@ const viewerTemplate = `<!DOCTYPE html>
     function toggleMsg(id) {
       var el = document.getElementById(id);
       if (el) el.classList.toggle('collapsed');
+    }
+
+    function toggleTool(id) {
+      var el = document.getElementById(id);
+      if (el) el.classList.toggle('open');
     }
 
     function openSystemModal(uid) {
@@ -896,6 +1162,7 @@ const viewerTemplate = `<!DOCTYPE html>
       if (activeSessionId) loadSessionDetail(activeSessionId);
     }
 
+    loadFilter();
     loadSessions();
   </script>
 </body>

@@ -197,6 +197,19 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	for _, tool := range parsed.Tools {
+		if err := s.db.InsertTool(ToolRecord{
+			RequestID:   requestID,
+			Type:        tool.Type,
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  tool.Parameters,
+			CreatedAt:   createdAt,
+		}); err != nil {
+			s.log.Error("insert tool failed", "error", err)
+		}
+	}
+
 	upstreamURL, err := s.buildUpstreamURL(r.URL, target)
 	if err != nil {
 		http.Error(w, "invalid upstream url", http.StatusBadGateway)
