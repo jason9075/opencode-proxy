@@ -1,5 +1,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+@default:
+  just --list
+
 @dev:
   air -c .air.toml
 
