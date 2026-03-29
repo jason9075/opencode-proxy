@@ -92,6 +92,37 @@ func parseOpenAIDelta(data []byte) string {
 	return ""
 }
 
+// parseOpenAIChunkPair returns (content, reasoning_content) from a single SSE chunk.
+func parseOpenAIChunkPair(data []byte) (string, string) {
+	var chunk OpenAIChunk
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return "", ""
+	}
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" {
+			return choice.Delta.Content, choice.Delta.ReasoningContent
+		}
+	}
+	return "", ""
+}
+
+// parseAnthropicDeltaPair returns (text, thinking) from a single Anthropic SSE event.
+func parseAnthropicDeltaPair(data []byte) (string, string) {
+	var event AnthropicStreamEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		return "", ""
+	}
+	if event.Type == "content_block_delta" && event.Delta != nil {
+		switch event.Delta.Type {
+		case "text_delta":
+			return event.Delta.Text, ""
+		case "thinking_delta":
+			return "", event.Delta.Thinking
+		}
+	}
+	return "", ""
+}
+
 func parseOpenAIFullDelta(data []byte) (string, string) {
 	var response OpenAIResponse
 	if err := json.Unmarshal(data, &response); err != nil {

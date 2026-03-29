@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -67,6 +68,23 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.Method == http.MethodGet && r.URL.Path == "/test/mock/gemini":
 		s.handleGeminiMock(w)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/viewer":
+		s.handleViewerPage(w)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/viewer/api/sessions":
+		s.handleViewerAPISessions(w)
+		return
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/viewer/api/sessions/"):
+		sid := strings.TrimPrefix(r.URL.Path, "/viewer/api/sessions/")
+		s.handleViewerAPISessionDetail(w, r, sid)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/viewer/api/requests":
+		s.handleViewerAPIRequests(w)
+		return
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/viewer/api/requests/"):
+		id := strings.TrimPrefix(r.URL.Path, "/viewer/api/requests/")
+		s.handleViewerAPIDetail(w, r, id)
 		return
 	}
 
@@ -1252,7 +1270,22 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 
 	_, _ = w.Write(data)
 
-	delta, thinking := s.extractFullResponseDelta(data, provider)
+	var delta, thinking string
+	ct := headers.Get("Content-Type")
+	if strings.Contains(ct, "text/event-stream") {
+		var sseUsage UsageRecord
+		var hasUsage bool
+		delta, thinking, sseUsage, hasUsage = s.extractFromSSE(data, requestID, provider)
+		if hasUsage {
+			_ = s.db.UpsertUsage(sseUsage)
+		}
+	} else {
+		delta, thinking = s.extractFullResponseDelta(data, provider)
+		if usage, ok := s.extractUsageFromResponse(data, requestID, provider); ok {
+			_ = s.db.UpsertUsage(usage)
+		}
+	}
+
 	if delta != "" || thinking != "" {
 		_ = s.appendLogLine(sessionID, proxyLogEntry{
 			Timestamp: time.Now(),
@@ -1268,10 +1301,6 @@ func (s *ProxyServer) forwardResponse(w http.ResponseWriter, body io.Reader, req
 			Thinking:  thinking,
 			CreatedAt: time.Now(),
 		})
-	}
-
-	if usage, ok := s.extractUsageFromResponse(data, requestID, provider); ok {
-		_ = s.db.UpsertUsage(usage)
 	}
 
 	debugBody := decodeDebugBody(data)
@@ -1345,6 +1374,44 @@ func (s *ProxyServer) extractFullResponseDelta(data []byte, provider string) (st
 	default:
 		return parseOpenAIFullDelta(data)
 	}
+}
+
+// extractFromSSE scans a raw SSE body line-by-line and accumulates text, thinking, and usage.
+func (s *ProxyServer) extractFromSSE(data []byte, requestID string, provider string) (text string, thinking string, usage UsageRecord, hasUsage bool) {
+	var textSB, thinkingSB strings.Builder
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		payloadBytes := []byte(payload)
+
+		switch provider {
+		case "gemini":
+			textSB.WriteString(parseGeminiDelta(payloadBytes))
+		case "anthropic":
+			t, th := parseAnthropicDeltaPair(payloadBytes)
+			textSB.WriteString(t)
+			thinkingSB.WriteString(th)
+		default:
+			t, th := parseOpenAIChunkPair(payloadBytes)
+			textSB.WriteString(t)
+			thinkingSB.WriteString(th)
+		}
+
+		if u, ok := s.extractUsage(line, requestID, provider); ok {
+			usage = u
+			hasUsage = true
+		}
+	}
+	return textSB.String(), thinkingSB.String(), usage, hasUsage
 }
 
 func (s *ProxyServer) extractUsageFromResponse(data []byte, requestID string, provider string) (UsageRecord, bool) {

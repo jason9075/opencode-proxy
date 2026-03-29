@@ -16,5 +16,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 @vet:
   go vet ./cmd/server
 
+@view:
+  xdg-open "http://localhost:${PORT:-8888}/viewer" 2>/dev/null || echo "Open: http://localhost:${PORT:-8888}/viewer"
+
 @test-e2e:
   curl --no-buffer -X POST "http://localhost:8888/test/mock/gemini" -H "Content-Type: application/json" -d '{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}'
