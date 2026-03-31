@@ -79,6 +79,10 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sid := strings.TrimPrefix(r.URL.Path, "/viewer/api/sessions/")
 		s.handleViewerAPISessionDetail(w, r, sid)
 		return
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/viewer/api/sessions/"):
+		sid := strings.TrimPrefix(r.URL.Path, "/viewer/api/sessions/")
+		s.handleViewerAPIDeleteSession(w, sid)
+		return
 	case r.Method == http.MethodGet && r.URL.Path == "/viewer/api/requests":
 		s.handleViewerAPIRequests(w)
 		return
@@ -256,7 +260,13 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.UpdateRawResponse(requestID, string(data)); err != nil {
 		s.log.Error("update raw response failed", "error", err)
 	}
-	clientRespBody := decodeDebugBody(data)
+	// clientData is what was actually written to the client.
+	// Currently identical to upstream data; will diverge once response transformation is added.
+	clientData := data
+	if err := s.db.UpdateRawClientResponse(requestID, string(clientData)); err != nil {
+		s.log.Error("update raw client response failed", "error", err)
+	}
+	clientRespBody := decodeDebugBody(clientData)
 
 	dbg.ClientResponse = &debugPayload{
 		Timestamp: time.Now(),

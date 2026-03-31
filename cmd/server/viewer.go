@@ -44,13 +44,14 @@ type ToolView struct {
 }
 
 type RequestDetailView struct {
-	Request     RequestViewRow `json:"request"`
-	Messages    []MessageView  `json:"messages"`
-	Tools       []ToolView     `json:"tools"`
-	RawBody     string         `json:"rawBody"`
-	RawResponse string         `json:"rawResponse"`
-	Response    string         `json:"response"`
-	Thinking    string         `json:"thinking"`
+	Request           RequestViewRow `json:"request"`
+	Messages          []MessageView  `json:"messages"`
+	Tools             []ToolView     `json:"tools"`
+	RawBody           string         `json:"rawBody"`
+	RawResponse       string         `json:"rawResponse"`
+	RawClientResponse string         `json:"rawClientResponse"`
+	Response          string         `json:"response"`
+	Thinking          string         `json:"thinking"`
 }
 
 type SessionView struct {
@@ -101,7 +102,7 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
 			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0),
-			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, '')
+			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, ''), COALESCE(r.raw_client_response, '')
 		FROM requests r
 		LEFT JOIN usage u ON u.request_id = r.id
 		WHERE r.session_id = ?
@@ -113,9 +114,10 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 	defer rows.Close()
 
 	type rowWithRaw struct {
-		row         RequestViewRow
-		rawBody     string
-		rawResponse string
+		row               RequestViewRow
+		rawBody           string
+		rawResponse       string
+		rawClientResponse string
 	}
 	var requestRows []rowWithRaw
 	for rows.Next() {
@@ -124,13 +126,13 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 		var completedAt sql.NullInt64
 		var temperature, topP sql.NullFloat64
 		var maxTokens sql.NullInt64
-		var rawBody, rawResponse string
+		var rawBody, rawResponse, rawClientResponse string
 		if err := rows.Scan(
 			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream, &row.Path,
 			&temperature, &topP, &maxTokens,
 			&row.StatusCode, &row.CreatedAt, &completedAt,
 			&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
-			&rawBody, &rawResponse,
+			&rawBody, &rawResponse, &rawClientResponse,
 		); err != nil {
 			return nil, fmt.Errorf("scan session request: %w", err)
 		}
@@ -150,7 +152,7 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 			v := int(maxTokens.Int64)
 			row.MaxTokens = &v
 		}
-		requestRows = append(requestRows, rowWithRaw{row: row, rawBody: rawBody, rawResponse: rawResponse})
+		requestRows = append(requestRows, rowWithRaw{row: row, rawBody: rawBody, rawResponse: rawResponse, rawClientResponse: rawClientResponse})
 	}
 	rows.Close()
 
@@ -215,13 +217,14 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 		toolRows.Close()
 
 		details = append(details, RequestDetailView{
-			Request:     req,
-			Messages:    messages,
-			Tools:       tools,
-			RawBody:     rr.rawBody,
-			RawResponse: rr.rawResponse,
-			Response:    sb.String(),
-			Thinking:    thinkingSb.String(),
+			Request:           req,
+			Messages:          messages,
+			Tools:             tools,
+			RawBody:           rr.rawBody,
+			RawResponse:       rr.rawResponse,
+			RawClientResponse: rr.rawClientResponse,
+			Response:          sb.String(),
+			Thinking:          thinkingSb.String(),
 		})
 	}
 	return details, nil
@@ -288,7 +291,7 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 
 	var temperature, topP sql.NullFloat64
 	var maxTokens sql.NullInt64
-	var rawBody, rawResponse string
+	var rawBody, rawResponse, rawClientResponse string
 
 	err := db.conn.QueryRow(`
 		SELECT
@@ -297,7 +300,7 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
 			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0),
-			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, '')
+			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, ''), COALESCE(r.raw_client_response, '')
 		FROM requests r
 		LEFT JOIN usage u ON u.request_id = r.id
 		WHERE r.id = ?
@@ -306,7 +309,7 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 		&temperature, &topP, &maxTokens,
 		&row.StatusCode, &row.CreatedAt, &completedAt,
 		&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
-		&rawBody, &rawResponse,
+		&rawBody, &rawResponse, &rawClientResponse,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -390,13 +393,14 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 	}
 
 	return &RequestDetailView{
-		Request:     row,
-		Messages:    messages,
-		Tools:       tools,
-		RawBody:     rawBody,
-		RawResponse: rawResponse,
-		Response:    sb.String(),
-		Thinking:    thinkingSb.String(),
+		Request:           row,
+		Messages:          messages,
+		Tools:             tools,
+		RawBody:           rawBody,
+		RawResponse:       rawResponse,
+		RawClientResponse: rawClientResponse,
+		Response:          sb.String(),
+		Thinking:          thinkingSb.String(),
 	}, nil
 }
 
@@ -458,6 +462,14 @@ func (s *ProxyServer) handleViewerAPIDetail(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(detail)
+}
+
+func (s *ProxyServer) handleViewerAPIDeleteSession(w http.ResponseWriter, sessionID string) {
+	if err := s.db.DeleteSession(sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- HTML template ----
@@ -527,7 +539,14 @@ const viewerTemplate = `<!DOCTYPE html>
       border-right: 1px solid var(--border);
       background: var(--bg);
       overflow: hidden;
+      transition: width 0.2s ease, min-width 0.2s ease;
     }
+    #sidebar.collapsed {
+      width: 40px; min-width: 40px;
+    }
+    #sidebar.collapsed #session-list,
+    #sidebar.collapsed #session-count-sidebar { display: none; }
+    #sidebar.collapsed #sidebar-header .sidebar-title { display: none; }
 
     #sidebar-header {
       padding: 10px 14px;
@@ -535,19 +554,69 @@ const viewerTemplate = `<!DOCTYPE html>
       font-size: 11px; font-weight: 700; text-transform: uppercase;
       letter-spacing: 0.8px; color: var(--muted);
       flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
     }
+    #sidebar-toggle {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 4px 6px; border-radius: 4px; line-height: 0;
+      flex-shrink: 0; display: flex; align-items: center;
+      transition: color 0.15s, background 0.15s;
+    }
+    #sidebar-toggle:hover { color: var(--fg); background: var(--bg3); }
+    #sidebar-toggle svg { display: block; transition: transform 0.2s ease; }
+    #sidebar.collapsed #sidebar-toggle svg { transform: rotate(180deg); }
 
     #session-list { flex: 1; overflow-y: auto; }
 
     .session-item {
       padding: 11px 14px; border-bottom: 1px solid var(--border2);
       cursor: pointer; border-left: 3px solid transparent;
-      transition: background 0.1s;
+      transition: background 0.1s; position: relative;
     }
     .session-item:hover { background: var(--bg3); }
     .session-item.active {
       background: #1c2b3a; border-left-color: var(--blue);
     }
+    /* ── Session bar (fixed top of main) ── */
+    #session-bar {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 20px;
+      background: var(--bg2); border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    #session-bar-id {
+      font-size: 12px; color: var(--muted); font-family: monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+    }
+    #session-bar-meta {
+      font-size: 11px; color: var(--dim); white-space: nowrap;
+    }
+    .session-bar-dot {
+      position: relative;
+    }
+    .session-bar-dot-btn {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      padding: 4px 7px; border-radius: 4px; font-size: 16px; line-height: 1;
+      display: flex; align-items: center; letter-spacing: 1px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .session-bar-dot-btn:hover { color: var(--fg); background: var(--bg3); }
+    .session-bar-menu {
+      display: none; position: absolute; right: 0; top: calc(100% + 4px);
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      min-width: 140px; z-index: 100; overflow: hidden;
+    }
+    .session-bar-menu.open { display: block; }
+    .session-bar-menu-item {
+      padding: 9px 14px; font-size: 12px; cursor: pointer;
+      display: flex; align-items: center; gap: 8px;
+      transition: background 0.1s;
+    }
+    .session-bar-menu-item:hover { background: var(--bg3); }
+    .session-bar-menu-item.danger { color: var(--red); }
+    .session-bar-menu-item.danger:hover { background: rgba(255,80,80,0.08); }
     .session-id {
       font-size: 12px; color: var(--text);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -850,16 +919,38 @@ const viewerTemplate = `<!DOCTYPE html>
 
   <div id="body">
     <div id="sidebar">
-      <div id="sidebar-header">Sessions</div>
+      <div id="sidebar-header">
+        <span class="sidebar-title">Sessions &nbsp;<span id="session-count-sidebar"></span></span>
+        <button id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9 2L4 7L9 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
       <div id="session-list">
         <div style="padding:20px 14px;color:var(--muted);">Loading&hellip;</div>
       </div>
     </div>
 
     <div id="main">
-      <div id="main-empty">
-        <div class="icon">&#x1F4AC;</div>
-        <p>Select a session to view the conversation</p>
+      <div id="session-bar" style="display:none;">
+        <span id="session-bar-id"></span>
+        <span id="session-bar-meta"></span>
+        <div class="session-bar-dot">
+          <button class="session-bar-dot-btn" onclick="toggleSessionMenu(event)" title="Options">&#x22EE;</button>
+          <div id="session-bar-menu" class="session-bar-menu">
+            <div class="session-bar-menu-item danger" onclick="deleteActiveSession()">
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 3.5h9M4.5 3.5V2.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v1M5 6v4M8 6v4M3 3.5l.5 7a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5l.5-7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Delete session
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="conv">
+        <div id="main-empty">
+          <div class="icon">&#x1F4AC;</div>
+          <p>Select a session to view the conversation</p>
+        </div>
       </div>
     </div>
   </div>
@@ -978,8 +1069,9 @@ const viewerTemplate = `<!DOCTYPE html>
     }
 
     function renderSessions(sessions) {
-      var el = document.getElementById('session-count');
-      el.textContent = sessions.length + ' session' + (sessions.length === 1 ? '' : 's');
+      var countText = sessions.length + ' session' + (sessions.length === 1 ? '' : 's');
+      document.getElementById('session-count').textContent = countText;
+      document.getElementById('session-count-sidebar').textContent = sessions.length;
 
       var list = document.getElementById('session-list');
       if (!sessions.length) {
@@ -1007,7 +1099,8 @@ const viewerTemplate = `<!DOCTYPE html>
         html += '<span>' + s.requestCount + ' req' + (s.requestCount === 1 ? '' : 's') + '</span>';
         if (s.totalTokens) html += '<span>' + fmt(s.totalTokens) + ' tok</span>';
         html += '<span>' + ago(s.lastActivity) + '</span>';
-        html += '</div></div>';
+        html += '</div>';
+        html += '</div>';
       }
       list.innerHTML = html;
     }
@@ -1018,6 +1111,37 @@ const viewerTemplate = `<!DOCTYPE html>
       activeSessionId = sessionId;
       renderSessions_highlight();
       loadSessionDetail(sessionId);
+    }
+
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('collapsed');
+    }
+
+    function toggleSessionMenu(evt) {
+      evt.stopPropagation();
+      document.getElementById('session-bar-menu').classList.toggle('open');
+    }
+
+    document.addEventListener('click', function() {
+      var menu = document.getElementById('session-bar-menu');
+      if (menu) menu.classList.remove('open');
+    });
+
+    function deleteActiveSession() {
+      document.getElementById('session-bar-menu').classList.remove('open');
+      if (!activeSessionId) return;
+      var sid = activeSessionId;
+      if (!confirm('Delete session "' + sid + '"?\nThis cannot be undone.')) return;
+      fetch('/viewer/api/sessions/' + encodeURIComponent(sid), { method: 'DELETE' })
+        .then(function(r) {
+          if (!r.ok) throw new Error('Delete failed: ' + r.status);
+          activeSessionId = null;
+          document.getElementById('session-bar').style.display = 'none';
+          document.getElementById('conv').innerHTML =
+            '<div style="padding:40px 32px;color:var(--muted);">Select a session to view details</div>';
+          loadSessions();
+        })
+        .catch(function(e) { alert(e.message); });
     }
 
     function renderSessions_highlight() {
@@ -1031,22 +1155,36 @@ const viewerTemplate = `<!DOCTYPE html>
     }
 
     function loadSessionDetail(sessionId) {
-      var main = document.getElementById('main');
-      main.innerHTML = '<div style="padding:40px 32px;color:var(--muted);">Loading&hellip;</div>';
+      var conv = document.getElementById('conv');
+      conv.innerHTML = '<div style="padding:40px 32px;color:var(--muted);">Loading&hellip;</div>';
 
       fetch('/viewer/api/sessions/' + encodeURIComponent(sessionId))
         .then(function(r) { return r.json(); })
         .then(function(data) { renderConversation(data || []); })
         .catch(function() {
-          document.getElementById('main').innerHTML =
+          document.getElementById('conv').innerHTML =
             '<div style="padding:40px 32px;color:var(--red);">Failed to load session</div>';
         });
     }
 
     function renderConversation(requests) {
-      var main = document.getElementById('main');
+      var conv = document.getElementById('conv');
+      var bar = document.getElementById('session-bar');
+      var totalMsgs = 0;
+      for (var ii = 0; ii < requests.length; ii++) {
+        var msgs = requests[ii].messages || [];
+        for (var jj = 0; jj < msgs.length; jj++) {
+          if (msgs[jj].role === 'user') totalMsgs++;
+        }
+      }
+      document.getElementById('session-bar-id').textContent = activeSessionId || '';
+      document.getElementById('session-bar-meta').textContent =
+        requests.length + ' request' + (requests.length === 1 ? '' : 's') +
+        ' · ' + totalMsgs + ' message' + (totalMsgs === 1 ? '' : 's');
+      bar.style.display = 'flex';
+
       if (!requests.length) {
-        main.innerHTML = '<div class="empty-conv">No requests in this session</div>';
+        conv.innerHTML = '<div class="empty-conv">No requests in this session</div>';
         return;
       }
 
@@ -1063,10 +1201,12 @@ const viewerTemplate = `<!DOCTYPE html>
         try { if (prettyRawBody) prettyRawBody = JSON.stringify(JSON.parse(prettyRawBody), null, 2); } catch(er) {}
         var prettyRawResp = d.rawResponse || '';
         try { if (prettyRawResp) prettyRawResp = JSON.stringify(JSON.parse(prettyRawResp), null, 2); } catch(er) {}
+        var prettyRawClientResp = d.rawClientResponse || '';
+        try { if (prettyRawClientResp) prettyRawClientResp = JSON.stringify(JSON.parse(prettyRawClientResp), null, 2); } catch(er) {}
         rawPayloads['cr-' + i]  = prettyRawBody;
         rawPayloads['ur-' + i]  = prettyRawBody;
         rawPayloads['us-' + i]  = prettyRawResp;
-        rawPayloads['cre-' + i] = prettyRawResp;
+        rawPayloads['cre-' + i] = prettyRawClientResp;
 
         /* ── sticky req header ── */
         html += '<div class="req-header">';
@@ -1232,7 +1372,7 @@ const viewerTemplate = `<!DOCTYPE html>
         /* ── client-response ── */
         html += '<div class="req-section section-client-response"' + (filter.clientResponse ? '' : ' style="display:none"') + '>';
         html += '<div class="section-label label-client-response" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>client-response';
-        if (d.rawResponse) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'cre-'+i+'\')">raw</button>';
+        if (d.rawClientResponse) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'cre-'+i+'\')">raw</button>';
         html += '</div>';
         html += '<div class="conv"><div class="meta-grid">';
         html += '<div class="meta-row"><span class="meta-key">status</span><span class="meta-val ' + statusClass(sc) + '">' + (sc || '-') + '</span></div>';
@@ -1243,12 +1383,19 @@ const viewerTemplate = `<!DOCTYPE html>
           html += '<div class="meta-row"><span class="meta-key">total tokens</span><span class="meta-val">' + fmt(r.totalTokens) + '</span></div>';
           if (r.cacheReadTokens) html += '<div class="meta-row"><span class="meta-key">cache read</span><span class="meta-val">' + fmt(r.cacheReadTokens) + '</span></div>';
         }
-        html += '</div></div>';
+        html += '</div>';
+        /* response content from raw_client_response */
+        if (prettyRawClientResp) {
+          html += '<div class="resp-bubble">' + esc(prettyRawClientResp) + '</div>';
+        } else {
+          html += '<div style="padding:8px 0;color:var(--dim);font-size:12px;">No client response captured</div>';
+        }
+        html += '</div>';
 
         html += '</div>'; /* .req-block */
       }
 
-      main.innerHTML = html;
+      conv.innerHTML = html;
     }
 
     function toggleMsg(id) {

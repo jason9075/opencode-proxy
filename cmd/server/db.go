@@ -111,6 +111,7 @@ func initSchema(conn *sql.DB) error {
 	addColumnIfMissing(conn, "responses", "thinking", "TEXT NOT NULL DEFAULT ''")
 	addColumnIfMissing(conn, "requests", "raw_body", "TEXT NOT NULL DEFAULT ''")
 	addColumnIfMissing(conn, "requests", "raw_response", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfMissing(conn, "requests", "raw_client_response", "TEXT NOT NULL DEFAULT ''")
 	return nil
 }
 
@@ -220,6 +221,18 @@ func (db *Database) UpdateRawResponse(id string, rawResponse string) error {
 	return nil
 }
 
+func (db *Database) UpdateRawClientResponse(id string, rawClientResponse string) error {
+	_, err := db.conn.Exec(
+		`UPDATE requests SET raw_client_response = ? WHERE id = ?;`,
+		rawClientResponse,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update raw client response: %w", err)
+	}
+	return nil
+}
+
 func (db *Database) CompleteRequest(id string, statusCode int) error {
 	_, err := db.conn.Exec(
 		`UPDATE requests SET status_code = ?, completed_at = ? WHERE id = ?;`,
@@ -258,6 +271,29 @@ func (db *Database) SetSetting(key string, value string) error {
 		return fmt.Errorf("set setting: %w", err)
 	}
 	return nil
+}
+
+func (db *Database) DeleteSession(sessionID string) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Delete child records first to respect FK constraints
+	for _, stmt := range []string{
+		`DELETE FROM usage WHERE request_id IN (SELECT id FROM requests WHERE session_id = ?)`,
+		`DELETE FROM responses WHERE request_id IN (SELECT id FROM requests WHERE session_id = ?)`,
+		`DELETE FROM tools WHERE request_id IN (SELECT id FROM requests WHERE session_id = ?)`,
+		`DELETE FROM messages WHERE request_id IN (SELECT id FROM requests WHERE session_id = ?)`,
+		`DELETE FROM requests WHERE session_id = ?`,
+	} {
+		if _, err := tx.Exec(stmt, sessionID); err != nil {
+			return fmt.Errorf("delete session: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 func boolToInt(value bool) int {
