@@ -652,6 +652,22 @@ const viewerTemplate = `<!DOCTYPE html>
     /* ── Request block ── */
     .req-block {
       border-bottom: 1px solid var(--border);
+      border-left: 3px solid transparent;
+    }
+
+    .req-divider {
+      display: flex; align-items: center; gap: 10px;
+      padding: 5px 21px;
+      border-top: 2px solid var(--border);
+      color: var(--dim); font-size: 10px; font-weight: 700;
+      letter-spacing: 1px; text-transform: uppercase;
+      background: var(--bg);
+    }
+    .req-divider::after {
+      content: ''; flex: 1; height: 1px; background: var(--border2);
+    }
+    .req-divider-num {
+      white-space: nowrap;
     }
 
     .req-header {
@@ -660,6 +676,11 @@ const viewerTemplate = `<!DOCTYPE html>
       background: var(--bg2); border-bottom: 1px solid var(--border2);
       font-size: 12px; color: var(--muted);
       position: sticky; top: 0; z-index: 5;
+    }
+    .req-index {
+      font-size: 10px; font-weight: 700; font-family: monospace;
+      color: var(--dim); opacity: 0.7;
+      margin-right: 2px;
     }
     .req-provider {
       font-size: 11px; font-weight: 700;
@@ -1188,13 +1209,22 @@ const viewerTemplate = `<!DOCTYPE html>
         return;
       }
 
+      var REQ_ACCENTS = ['#388bfd','#3fb950','#d29922','#9d4edd'];
+
       var html = '';
       for (var i = 0; i < requests.length; i++) {
         var d = requests[i];
         var r = d.request;
         var sc = r.statusCode;
+        var accent = REQ_ACCENTS[i % REQ_ACCENTS.length];
 
-        html += '<div class="req-block">';
+        if (i > 0) {
+          html += '<div class="req-divider" style="border-top-color:' + accent + ';color:' + accent + '">';
+          html += '<span class="req-divider-num">request #' + (i + 1) + '</span>';
+          html += '</div>';
+        }
+
+        html += '<div class="req-block" style="border-left-color:' + accent + '">';
 
         /* pre-compute pretty raw payloads */
         var prettyRawBody = d.rawBody || '';
@@ -1209,7 +1239,8 @@ const viewerTemplate = `<!DOCTYPE html>
         rawPayloads['cre-' + i] = prettyRawClientResp;
 
         /* ── sticky req header ── */
-        html += '<div class="req-header">';
+        html += '<div class="req-header" style="border-left:3px solid ' + accent + ';padding-left:21px">';
+        html += '<span class="req-index">#' + (i + 1) + '</span>';
         html += '<span class="req-provider ' + providerClass(r.provider) + '">' + esc(r.provider) + '</span>';
         html += '<span class="req-model">' + esc(r.model || '-') + '</span>';
         html += '<span class="req-sep">·</span>';
