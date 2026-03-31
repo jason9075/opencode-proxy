@@ -178,6 +178,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Temperature: parsed.Temperature,
 		TopP:        parsed.TopP,
 		MaxTokens:   parsed.MaxTokens,
+		RawBody:     string(body),
 		CreatedAt:   createdAt,
 	}
 
@@ -252,6 +253,9 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	data, upstreamResp := s.forwardResponse(w, resp.Body, requestID, parsed.SessionID, target.provider, resp.Header, resp.StatusCode)
 	dbg.UpstreamResponse = &upstreamResp
+	if err := s.db.UpdateRawResponse(requestID, string(data)); err != nil {
+		s.log.Error("update raw response failed", "error", err)
+	}
 	clientRespBody := decodeDebugBody(data)
 
 	dbg.ClientResponse = &debugPayload{

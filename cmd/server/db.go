@@ -109,6 +109,8 @@ func initSchema(conn *sql.DB) error {
 
 	addColumnIfMissing(conn, "usage", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0")
 	addColumnIfMissing(conn, "responses", "thinking", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfMissing(conn, "requests", "raw_body", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfMissing(conn, "requests", "raw_response", "TEXT NOT NULL DEFAULT ''")
 	return nil
 }
 
@@ -118,8 +120,8 @@ func addColumnIfMissing(conn *sql.DB, table, column, def string) {
 
 func (db *Database) InsertRequest(req RequestRecord) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO requests (id, session_id, provider, model, stream, path, user, temperature, top_p, max_tokens, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		`INSERT INTO requests (id, session_id, provider, model, stream, path, user, temperature, top_p, max_tokens, raw_body, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		req.ID,
 		req.SessionID,
 		req.Provider,
@@ -130,6 +132,7 @@ func (db *Database) InsertRequest(req RequestRecord) error {
 		req.Temperature,
 		req.TopP,
 		req.MaxTokens,
+		req.RawBody,
 		req.CreatedAt.UnixMilli(),
 	)
 	if err != nil {
@@ -201,6 +204,18 @@ func (db *Database) InsertTool(tool ToolRecord) error {
 	)
 	if err != nil {
 		return fmt.Errorf("insert tool: %w", err)
+	}
+	return nil
+}
+
+func (db *Database) UpdateRawResponse(id string, rawResponse string) error {
+	_, err := db.conn.Exec(
+		`UPDATE requests SET raw_response = ? WHERE id = ?;`,
+		rawResponse,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update raw response: %w", err)
 	}
 	return nil
 }

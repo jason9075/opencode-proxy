@@ -44,11 +44,13 @@ type ToolView struct {
 }
 
 type RequestDetailView struct {
-	Request  RequestViewRow `json:"request"`
-	Messages []MessageView  `json:"messages"`
-	Tools    []ToolView     `json:"tools"`
-	Response string         `json:"response"`
-	Thinking string         `json:"thinking"`
+	Request     RequestViewRow `json:"request"`
+	Messages    []MessageView  `json:"messages"`
+	Tools       []ToolView     `json:"tools"`
+	RawBody     string         `json:"rawBody"`
+	RawResponse string         `json:"rawResponse"`
+	Response    string         `json:"response"`
+	Thinking    string         `json:"thinking"`
 }
 
 type SessionView struct {
@@ -98,7 +100,8 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 			r.temperature, r.top_p, r.max_tokens,
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
-			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0)
+			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0),
+			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, '')
 		FROM requests r
 		LEFT JOIN usage u ON u.request_id = r.id
 		WHERE r.session_id = ?
@@ -109,18 +112,25 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 	}
 	defer rows.Close()
 
-	var requestRows []RequestViewRow
+	type rowWithRaw struct {
+		row         RequestViewRow
+		rawBody     string
+		rawResponse string
+	}
+	var requestRows []rowWithRaw
 	for rows.Next() {
 		var row RequestViewRow
 		var stream int
 		var completedAt sql.NullInt64
 		var temperature, topP sql.NullFloat64
 		var maxTokens sql.NullInt64
+		var rawBody, rawResponse string
 		if err := rows.Scan(
 			&row.ID, &row.SessionID, &row.Provider, &row.Model, &stream, &row.Path,
 			&temperature, &topP, &maxTokens,
 			&row.StatusCode, &row.CreatedAt, &completedAt,
 			&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
+			&rawBody, &rawResponse,
 		); err != nil {
 			return nil, fmt.Errorf("scan session request: %w", err)
 		}
@@ -140,12 +150,13 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 			v := int(maxTokens.Int64)
 			row.MaxTokens = &v
 		}
-		requestRows = append(requestRows, row)
+		requestRows = append(requestRows, rowWithRaw{row: row, rawBody: rawBody, rawResponse: rawResponse})
 	}
 	rows.Close()
 
 	var details []RequestDetailView
-	for _, req := range requestRows {
+	for _, rr := range requestRows {
+		req := rr.row
 		msgRows, err := db.conn.Query(
 			`SELECT role, content, COALESCE(name, '') FROM messages WHERE request_id = ? ORDER BY id ASC`,
 			req.ID,
@@ -204,11 +215,13 @@ func (db *Database) ListSessionDetails(sessionID string) ([]RequestDetailView, e
 		toolRows.Close()
 
 		details = append(details, RequestDetailView{
-			Request:  req,
-			Messages: messages,
-			Tools:    tools,
-			Response: sb.String(),
-			Thinking: thinkingSb.String(),
+			Request:     req,
+			Messages:    messages,
+			Tools:       tools,
+			RawBody:     rr.rawBody,
+			RawResponse: rr.rawResponse,
+			Response:    sb.String(),
+			Thinking:    thinkingSb.String(),
 		})
 	}
 	return details, nil
@@ -275,6 +288,7 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 
 	var temperature, topP sql.NullFloat64
 	var maxTokens sql.NullInt64
+	var rawBody, rawResponse string
 
 	err := db.conn.QueryRow(`
 		SELECT
@@ -282,7 +296,8 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 			r.temperature, r.top_p, r.max_tokens,
 			COALESCE(r.status_code, 0), r.created_at, r.completed_at,
 			COALESCE(u.prompt_tokens, 0), COALESCE(u.completion_tokens, 0),
-			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0)
+			COALESCE(u.total_tokens, 0), COALESCE(u.cache_read_tokens, 0),
+			COALESCE(r.raw_body, ''), COALESCE(r.raw_response, '')
 		FROM requests r
 		LEFT JOIN usage u ON u.request_id = r.id
 		WHERE r.id = ?
@@ -291,6 +306,7 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 		&temperature, &topP, &maxTokens,
 		&row.StatusCode, &row.CreatedAt, &completedAt,
 		&row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.CacheReadTokens,
+		&rawBody, &rawResponse,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -374,11 +390,13 @@ func (db *Database) GetRequestViewDetail(id string) (*RequestDetailView, error) 
 	}
 
 	return &RequestDetailView{
-		Request:  row,
-		Messages: messages,
-		Tools:    tools,
-		Response: sb.String(),
-		Thinking: thinkingSb.String(),
+		Request:     row,
+		Messages:    messages,
+		Tools:       tools,
+		RawBody:     rawBody,
+		RawResponse: rawResponse,
+		Response:    sb.String(),
+		Thinking:    thinkingSb.String(),
 	}, nil
 }
 
@@ -613,16 +631,16 @@ const viewerTemplate = `<!DOCTYPE html>
       max-height: 180px; overflow-y: auto;
     }
 
-    /* collapsible system message */
-    .msg-toggle {
-      background: none; border: none; padding: 0 4px;
-      color: var(--dim); font-size: 11px; cursor: pointer;
-      display: inline-flex; align-items: center; gap: 4px;
-    }
-    .msg-toggle:hover { color: var(--muted); background: none; }
+    /* collapsible messages */
     .msg.collapsed .msg-bubble { display: none; }
-    .msg.collapsed .msg-toggle::before { content: "show"; }
-    .msg:not(.collapsed) .msg-toggle::before { content: "hide"; }
+    .m-chevron {
+      background: none; border: none; padding: 0; margin-right: 5px;
+      color: var(--dim); font-size: 9px; cursor: pointer; font-family: inherit;
+      display: inline-flex; align-items: center; flex-shrink: 0;
+      transition: transform 0.15s; line-height: 1; vertical-align: middle;
+    }
+    .m-chevron:hover { color: var(--muted); background: none; }
+    .msg.collapsed .m-chevron { transform: rotate(-90deg); }
     .msg-detail-btn {
       background: none; border: 1px solid var(--border);
       padding: 0 7px; border-radius: 4px; line-height: 18px;
@@ -688,15 +706,45 @@ const viewerTemplate = `<!DOCTYPE html>
 
     /* ── Request sections ── */
     .req-section { border-top: 1px solid var(--border2); }
+    .req-section.collapsed .conv { display: none; }
     .section-label {
       padding: 5px 24px; font-size: 10px; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.8px;
       border-left: 3px solid transparent;
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center;
     }
+    .section-label:hover { filter: brightness(1.2); }
+    .s-chevron {
+      font-size: 8px; margin-right: 7px; flex-shrink: 0;
+      transition: transform 0.15s; opacity: 0.8;
+    }
+    .req-section.collapsed .s-chevron { transform: rotate(-90deg); }
+    .section-raw-btn {
+      margin-left: auto; padding: 1px 8px; border-radius: 3px;
+      border: 1px solid currentColor; background: transparent;
+      font-size: 10px; cursor: pointer; font-family: inherit;
+      opacity: 0.5; transition: opacity 0.1s; line-height: 16px; flex-shrink: 0;
+    }
+    .section-raw-btn:hover { opacity: 1; background: transparent; }
     .label-client-request   { color: var(--blue);   border-left-color: var(--blue);   background: #0d1520; }
     .label-upstream-request  { color: var(--muted);  border-left-color: var(--muted);  background: #13191f; }
     .label-upstream-response { color: var(--yellow); border-left-color: var(--yellow); background: #161200; }
     .label-client-response   { color: var(--green);  border-left-color: var(--green);  background: #0a1a0a; }
+
+    /* ── Raw payload block ── */
+    .raw-section { display: flex; flex-direction: column; gap: 4px; }
+    .raw-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.6px; color: var(--dim);
+    }
+    .raw-block {
+      padding: 10px 14px; border-radius: 6px;
+      background: var(--bg); border: 1px solid var(--border2);
+      font-size: 11px; line-height: 1.55; color: var(--muted);
+      white-space: pre-wrap; word-break: break-all;
+      max-height: 320px; overflow-y: auto; font-family: inherit;
+    }
 
     /* ── Meta grid (for upstream-request / client-response) ── */
     .meta-grid { display: flex; flex-direction: column; gap: 4px; }
@@ -706,10 +754,15 @@ const viewerTemplate = `<!DOCTYPE html>
 
     /* ── Tools ── */
     .tools-section { display: flex; flex-direction: column; gap: 6px; }
+    .tools-section.collapsed .tools-list { display: none; }
     .tools-label {
       font-size: 11px; font-weight: 700; text-transform: uppercase;
       letter-spacing: 0.6px; color: var(--purple);
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center;
     }
+    .tools-label:hover { opacity: 0.8; }
+    .tools-section.collapsed .s-chevron { transform: rotate(-90deg); }
     .tools-list { display: flex; flex-direction: column; gap: 6px; }
     .tool-item {
       border: 1px solid #2d1f40; border-radius: 6px;
@@ -827,6 +880,7 @@ const viewerTemplate = `<!DOCTYPE html>
   <script>
     var activeSessionId = null;
     var systemPromptContents = {};
+    var rawPayloads = {};
 
     /* ── Filter ── */
     var FILTER_KEY = 'proxy_viewer_filter_v1';
@@ -1004,6 +1058,16 @@ const viewerTemplate = `<!DOCTYPE html>
 
         html += '<div class="req-block">';
 
+        /* pre-compute pretty raw payloads */
+        var prettyRawBody = d.rawBody || '';
+        try { if (prettyRawBody) prettyRawBody = JSON.stringify(JSON.parse(prettyRawBody), null, 2); } catch(er) {}
+        var prettyRawResp = d.rawResponse || '';
+        try { if (prettyRawResp) prettyRawResp = JSON.stringify(JSON.parse(prettyRawResp), null, 2); } catch(er) {}
+        rawPayloads['cr-' + i]  = prettyRawBody;
+        rawPayloads['ur-' + i]  = prettyRawBody;
+        rawPayloads['us-' + i]  = prettyRawResp;
+        rawPayloads['cre-' + i] = prettyRawResp;
+
         /* ── sticky req header ── */
         html += '<div class="req-header">';
         html += '<span class="req-provider ' + providerClass(r.provider) + '">' + esc(r.provider) + '</span>';
@@ -1021,7 +1085,9 @@ const viewerTemplate = `<!DOCTYPE html>
 
         /* ── client-request ── */
         html += '<div class="req-section section-client-request"' + (filter.clientRequest ? '' : ' style="display:none"') + '>';
-        html += '<div class="section-label label-client-request">client-request</div>';
+        html += '<div class="section-label label-client-request" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>client-request';
+        if (d.rawBody) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'cr-'+i+'\')">raw</button>';
+        html += '</div>';
         html += '<div class="conv">';
 
         var msgs = d.messages || [];
@@ -1035,8 +1101,9 @@ const viewerTemplate = `<!DOCTYPE html>
           var uid = 'sm-' + i + '-' + j;
           systemPromptContents[uid] = m.content;
           html += '<div class="msg role-system collapsed" id="' + uid + '">';
-          html += '<div class="msg-role-label">System ';
-          html += '<button class="msg-toggle" onclick="toggleMsg(\'' + uid + '\')"></button>';
+          html += '<div class="msg-role-label">';
+          html += '<button class="m-chevron" onclick="toggleMsg(\'' + uid + '\')">&#9660;</button>';
+          html += 'System';
           html += '<button class="msg-detail-btn" onclick="openSystemModal(\'' + uid + '\')">detail</button>';
           html += '</div>';
           html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
@@ -1044,8 +1111,11 @@ const viewerTemplate = `<!DOCTYPE html>
         }
         for (var j = 0; j < convMsgs.length; j++) {
           var m = convMsgs[j];
-          html += '<div class="msg role-' + esc(m.role || 'user') + '">';
-          html += '<div class="msg-role-label">' + esc(m.role || 'user');
+          var mid = 'cm-' + i + '-' + j;
+          html += '<div class="msg role-' + esc(m.role || 'user') + '" id="' + mid + '">';
+          html += '<div class="msg-role-label">';
+          html += '<button class="m-chevron" onclick="toggleMsg(\'' + mid + '\')">&#9660;</button>';
+          html += esc(m.role || 'user');
           if (m.name) html += ' <span style="color:var(--dim);font-weight:400;">' + esc(m.name) + '</span>';
           html += '</div>';
           html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
@@ -1054,7 +1124,7 @@ const viewerTemplate = `<!DOCTYPE html>
         var tools = d.tools || [];
         if (tools.length) {
           html += '<div class="tools-section">';
-          html += '<div class="tools-label">Tools (' + tools.length + ')</div>';
+          html += '<div class="tools-label" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>Tools (' + tools.length + ')</div>';
           html += '<div class="tools-list">';
           for (var j = 0; j < tools.length; j++) {
             var t = tools[j];
@@ -1077,20 +1147,63 @@ const viewerTemplate = `<!DOCTYPE html>
 
         /* ── upstream-request ── */
         html += '<div class="req-section section-upstream-request"' + (filter.upstreamRequest ? '' : ' style="display:none"') + '>';
-        html += '<div class="section-label label-upstream-request">upstream-request</div>';
-        html += '<div class="conv"><div class="meta-grid">';
-        html += '<div class="meta-row"><span class="meta-key">provider</span><span class="meta-val"><span class="req-provider ' + providerClass(r.provider) + '">' + esc(r.provider) + '</span></span></div>';
-        html += '<div class="meta-row"><span class="meta-key">path</span><span class="meta-val">' + esc(r.path || '-') + '</span></div>';
-        html += '<div class="meta-row"><span class="meta-key">model</span><span class="meta-val">' + esc(r.model || '-') + '</span></div>';
-        html += '<div class="meta-row"><span class="meta-key">stream</span><span class="meta-val">' + (r.stream ? 'true' : 'false') + '</span></div>';
-        if (r.temperature != null) html += '<div class="meta-row"><span class="meta-key">temperature</span><span class="meta-val">' + r.temperature + '</span></div>';
-        if (r.topP != null)        html += '<div class="meta-row"><span class="meta-key">top_p</span><span class="meta-val">' + r.topP + '</span></div>';
-        if (r.maxTokens != null)   html += '<div class="meta-row"><span class="meta-key">max_tokens</span><span class="meta-val">' + r.maxTokens + '</span></div>';
-        html += '</div></div></div>'; /* .meta-grid + .conv + .req-section */
+        html += '<div class="section-label label-upstream-request" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>upstream-request';
+        if (d.rawBody) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'ur-'+i+'\')">raw</button>';
+        html += '</div>';
+        html += '<div class="conv">';
+        for (var j = 0; j < systemMsgs.length; j++) {
+          var m = systemMsgs[j];
+          var uid2 = 'usm-' + i + '-' + j;
+          systemPromptContents[uid2] = m.content;
+          html += '<div class="msg role-system collapsed" id="' + uid2 + '">';
+          html += '<div class="msg-role-label">';
+          html += '<button class="m-chevron" onclick="toggleMsg(\'' + uid2 + '\')">&#9660;</button>';
+          html += 'System';
+          html += '<button class="msg-detail-btn" onclick="openSystemModal(\'' + uid2 + '\')">detail</button>';
+          html += '</div>';
+          html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
+          html += '</div>';
+        }
+        for (var j = 0; j < convMsgs.length; j++) {
+          var m = convMsgs[j];
+          var mid2 = 'ucm-' + i + '-' + j;
+          html += '<div class="msg role-' + esc(m.role || 'user') + '" id="' + mid2 + '">';
+          html += '<div class="msg-role-label">';
+          html += '<button class="m-chevron" onclick="toggleMsg(\'' + mid2 + '\')">&#9660;</button>';
+          html += esc(m.role || 'user');
+          if (m.name) html += ' <span style="color:var(--dim);font-weight:400;">' + esc(m.name) + '</span>';
+          html += '</div>';
+          html += '<div class="msg-bubble">' + esc(m.content) + '</div>';
+          html += '</div>';
+        }
+        if (tools.length) {
+          html += '<div class="tools-section">';
+          html += '<div class="tools-label" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>Tools (' + tools.length + ')</div>';
+          html += '<div class="tools-list">';
+          for (var j = 0; j < tools.length; j++) {
+            var t2 = tools[j];
+            var tid2 = 'utool-' + i + '-' + j;
+            var pp2 = t2.parameters;
+            try { pp2 = JSON.stringify(JSON.parse(t2.parameters), null, 2); } catch(e5) {}
+            html += '<div class="tool-item" id="' + tid2 + '">';
+            html += '<div class="tool-header" onclick="toggleTool(\'' + tid2 + '\')">';
+            html += '<span class="tool-badge">' + esc(t2.type || 'fn') + '</span>';
+            html += '<span class="tool-name">' + esc(t2.name) + '</span>';
+            if (t2.description) html += '<span class="tool-desc">' + esc(t2.description) + '</span>';
+            html += '<span class="tool-chevron">&#9654;</span>';
+            html += '</div>';
+            html += '<div class="tool-params">' + esc(pp2) + '</div>';
+            html += '</div>';
+          }
+          html += '</div></div>';
+        }
+        html += '</div></div>'; /* .conv + .req-section */
 
         /* ── upstream-response ── */
         html += '<div class="req-section section-upstream-response"' + (filter.upstreamResponse ? '' : ' style="display:none"') + '>';
-        html += '<div class="section-label label-upstream-response">upstream-response</div>';
+        html += '<div class="section-label label-upstream-response" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>upstream-response';
+        if (d.rawResponse) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'us-'+i+'\')">raw</button>';
+        html += '</div>';
         html += '<div class="conv">';
         if (d.thinking) {
           html += '<div class="thinking-section">';
@@ -1105,13 +1218,22 @@ const viewerTemplate = `<!DOCTYPE html>
           html += '</div>';
         }
         if (!d.thinking && !d.response) {
-          html += '<span style="color:var(--dim);font-size:12px;">No response captured</span>';
+          if (prettyRawResp) {
+            html += '<div class="resp-section">';
+            html += '<div class="resp-label">Response (raw)</div>';
+            html += '<div class="resp-bubble">' + esc(prettyRawResp) + '</div>';
+            html += '</div>';
+          } else {
+            html += '<span style="color:var(--dim);font-size:12px;">No response captured</span>';
+          }
         }
         html += '</div></div>';
 
         /* ── client-response ── */
         html += '<div class="req-section section-client-response"' + (filter.clientResponse ? '' : ' style="display:none"') + '>';
-        html += '<div class="section-label label-client-response">client-response</div>';
+        html += '<div class="section-label label-client-response" onclick="toggleSection(this.parentElement)"><span class="s-chevron">&#9660;</span>client-response';
+        if (d.rawResponse) html += '<button class="section-raw-btn" onclick="event.stopPropagation();openRawModal(\'cre-'+i+'\')">raw</button>';
+        html += '</div>';
         html += '<div class="conv"><div class="meta-grid">';
         html += '<div class="meta-row"><span class="meta-key">status</span><span class="meta-val ' + statusClass(sc) + '">' + (sc || '-') + '</span></div>';
         html += '<div class="meta-row"><span class="meta-key">duration</span><span class="meta-val">' + dur(r.durationMs) + '</span></div>';
@@ -1121,7 +1243,7 @@ const viewerTemplate = `<!DOCTYPE html>
           html += '<div class="meta-row"><span class="meta-key">total tokens</span><span class="meta-val">' + fmt(r.totalTokens) + '</span></div>';
           if (r.cacheReadTokens) html += '<div class="meta-row"><span class="meta-key">cache read</span><span class="meta-val">' + fmt(r.cacheReadTokens) + '</span></div>';
         }
-        html += '</div></div></div>';
+        html += '</div></div>';
 
         html += '</div>'; /* .req-block */
       }
@@ -1139,8 +1261,21 @@ const viewerTemplate = `<!DOCTYPE html>
       if (el) el.classList.toggle('open');
     }
 
+    function toggleSection(el) {
+      if (el) el.classList.toggle('collapsed');
+    }
+
     function openSystemModal(uid) {
       var content = systemPromptContents[uid] || '';
+      document.getElementById('modal-title').textContent = 'System Prompt';
+      document.getElementById('modal-body').textContent = content;
+      document.getElementById('modal-len').textContent = content.length.toLocaleString() + ' chars';
+      document.getElementById('modal-overlay').classList.add('open');
+    }
+
+    function openRawModal(uid) {
+      var content = rawPayloads[uid] || '';
+      document.getElementById('modal-title').textContent = 'Raw Payload';
       document.getElementById('modal-body').textContent = content;
       document.getElementById('modal-len').textContent = content.length.toLocaleString() + ' chars';
       document.getElementById('modal-overlay').classList.add('open');

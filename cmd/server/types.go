@@ -13,6 +13,7 @@ type RequestRecord struct {
 	Temperature *float64
 	TopP        *float64
 	MaxTokens   *int
+	RawBody     string
 	CreatedAt   time.Time
 }
 
