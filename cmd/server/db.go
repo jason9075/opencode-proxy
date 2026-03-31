@@ -101,6 +101,11 @@ func initSchema(conn *sql.DB) error {
       created_at INTEGER NOT NULL,
       FOREIGN KEY (request_id) REFERENCES requests(id)
     );
+
+    CREATE TABLE IF NOT EXISTS session_hashes (
+      hash TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL
+    );
   `)
 
 	if err != nil {
@@ -294,6 +299,33 @@ func (db *Database) DeleteSession(sessionID string) error {
 	}
 
 	return tx.Commit()
+}
+
+func (db *Database) LoadSessionHashes() (map[string]string, error) {
+	rows, err := db.conn.Query(`SELECT hash, session_id FROM session_hashes`)
+	if err != nil {
+		return nil, fmt.Errorf("load session hashes: %w", err)
+	}
+	defer rows.Close()
+
+	index := make(map[string]string)
+	for rows.Next() {
+		var hash, sessionID string
+		if err := rows.Scan(&hash, &sessionID); err != nil {
+			return nil, fmt.Errorf("scan session hash: %w", err)
+		}
+		index[hash] = sessionID
+	}
+	return index, rows.Err()
+}
+
+func (db *Database) UpsertSessionHash(hash, sessionID string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO session_hashes (hash, session_id) VALUES (?, ?)
+         ON CONFLICT(hash) DO UPDATE SET session_id = excluded.session_id`,
+		hash, sessionID,
+	)
+	return err
 }
 
 func boolToInt(value bool) int {

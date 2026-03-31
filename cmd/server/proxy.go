@@ -39,6 +39,12 @@ type queueItem struct {
 }
 
 func NewProxyServer(cfg Config, db *Database, log *slog.Logger) *ProxyServer {
+	index, err := db.LoadSessionHashes()
+	if err != nil {
+		log.Warn("failed to load session hashes, starting fresh", "err", err)
+		index = make(map[string]string)
+	}
+
 	server := &ProxyServer{
 		cfg: cfg,
 		db:  db,
@@ -48,7 +54,7 @@ func NewProxyServer(cfg Config, db *Database, log *slog.Logger) *ProxyServer {
 		log:          log,
 		queue:        make(chan queueItem),
 		inflight:     make(map[string]struct{}),
-		sessionIndex: make(map[string]string),
+		sessionIndex: index,
 	}
 	go server.runQueue()
 	return server
@@ -420,6 +426,7 @@ func (s *ProxyServer) getSessionID(userTurns []string) string {
 		prev := hashUserTurns(userTurns[:len(userTurns)-1])
 		if existing, ok := s.sessionIndex[prev]; ok {
 			s.sessionIndex[cur] = existing
+			_ = s.db.UpsertSessionHash(cur, existing)
 			return existing
 		}
 	}
@@ -427,6 +434,7 @@ func (s *ProxyServer) getSessionID(userTurns []string) string {
 	// first turn or no match: new session
 	sessionID := uuid.New().String()
 	s.sessionIndex[cur] = sessionID
+	_ = s.db.UpsertSessionHash(cur, sessionID)
 	return sessionID
 }
 
